@@ -58,15 +58,68 @@ target_link_libraries(${rendering_target}
     gz-rendering${GZ_RENDERING_VER}::gz-rendering${GZ_RENDERING_VER}
 )
 
-set(camera_sources CameraSensor.cc)
+find_package(ament_cmake REQUIRED)
+find_package(ament_index_cpp REQUIRED)
+find_package(rclcpp REQUIRED)
+find_package(rclcpp_components REQUIRED)
+find_package(std_msgs REQUIRED)
+# find_package(phntm_interfaces REQUIRED)
+find_package(ffmpeg_image_transport_msgs REQUIRED)
+find_package(sensor_msgs REQUIRED)
+find_package(std_srvs REQUIRED)
+#find_package(${rendering_target} REQUIRED)
+
+set(camera_sources CameraSensor.cc DirectRosNode.cc)
 gz_add_component(camera
   SOURCES ${camera_sources}
   DEPENDS_ON_COMPONENTS rendering
   GET_TARGET_NAME camera_target
 )
+target_include_directories(${camera_target} PUBLIC
+    /opt/ros/jazzy/include/type_description_interfaces
+    /opt/ros/jazzy/include/service_msgs
+    /opt/ros/jazzy/include/rosidl_dynamic_typesupport
+    /opt/ros/jazzy/include/rclcpp
+    /opt/ros/jazzy/include/std_msgs
+    /opt/ros/jazzy/include/sensor_msgs
+    /opt/ros/jazzy/include/std_srvs
+    /opt/ros/jazzy/include/ament_index_cpp
+    /opt/ros/jazzy/include/libstatistics_collector
+    /opt/ros/jazzy/include/builtin_interfaces
+    /opt/ros/jazzy/include/rosidl_runtime_c
+    /opt/ros/jazzy/include/rcutils
+    /opt/ros/jazzy/include/rosidl_typesupport_interface
+    /opt/ros/jazzy/include/fastcdr
+    /opt/ros/jazzy/include/rosidl_runtime_cpp
+    /opt/ros/jazzy/include/rosidl_typesupport_fastrtps_cpp
+    /opt/ros/jazzy/include/rmw
+    /opt/ros/jazzy/include/rosidl_typesupport_fastrtps_c
+    /opt/ros/jazzy/include/rosidl_typesupport_introspection_c
+    /opt/ros/jazzy/include/rosidl_typesupport_introspection_cpp
+    /opt/ros/jazzy/include/rcl
+    /opt/ros/jazzy/include/rcl_interfaces
+    /opt/ros/jazzy/include/rcl_logging_interface
+    /opt/ros/jazzy/include/rcl_yaml_param_parser
+    /opt/ros/jazzy/include/tracetools
+    /opt/ros/jazzy/include/rcpputils
+    /opt/ros/jazzy/include/statistics_msgs
+    /opt/ros/jazzy/include/ffmpeg_image_transport_msgs
+    /opt/ros/jazzy/include/rosgraph_msgs
+    /opt/ros/jazzy/include/rosidl_typesupport_cpp
+    /opt/ros/jazzy/include/rosidl_typesupport_c
+)
 # custom compile definitions since the one provided automatically is versioned and will
 # make the code need to change with every major version
 target_compile_definitions(${camera_target} PUBLIC CameraSensor_EXPORTS)
+
+ament_target_dependencies(${camera_target}
+  PUBLIC
+    rclcpp
+    std_msgs
+    sensor_msgs
+    ffmpeg_image_transport_msgs
+)
+
 target_link_libraries(${camera_target}
   PUBLIC
     ${rendering_target}

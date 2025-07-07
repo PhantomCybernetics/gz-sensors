@@ -44,6 +44,8 @@
 #include "gz/sensors/Export.hh"
 #include "gz/sensors/RenderingSensor.hh"
 
+#include <rclcpp/node.hpp>
+
 namespace gz
 {
   namespace sensors
@@ -123,6 +125,10 @@ namespace gz
       /// \brief Topic where camera info is published.
       /// \return Camera info topic.
       public: std::string InfoTopic() const;
+
+      /// \brief Topic where camera h264 is published.
+      /// \return Camera h264 topic.
+      public: std::string H264Topic() const;
 
       /// \brief Set baseline for stereo cameras. This is used to populate the
       /// projection matrix in the camera info message.

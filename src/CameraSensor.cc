@@ -44,6 +44,13 @@
 #include "gz/sensors/SensorTypes.hh"
 
 #include <gz/rendering/Utils.hh>
+#include "gz/sensors/DirectRosNode.hh"
+#include "std_msgs/msg/header.hpp"
+#include <sensor_msgs/msg/image.hpp>
+#include <ffmpeg_image_transport_msgs/msg/ffmpeg_packet.hpp>
+#include <rclcpp/publisher.hpp>
+#include <rclcpp/qos.hpp>
+#include <std_msgs/msg/header.hpp>
 
 using namespace gz;
 using namespace sensors;
@@ -135,6 +142,9 @@ class gz::sensors::CameraSensorPrivate
   /// \brief Camera info publisher to publish images
   public: transport::Node::Publisher infoPub;
 
+  /// \brief publisher to publish h254
+  public: transport::Node::Publisher pubH264;
+
   /// \brief true if Load() has been called and was successful
   public: bool initialized = false;
 
@@ -185,12 +195,22 @@ class gz::sensors::CameraSensorPrivate
   /// \brief Topic for info message.
   public: std::string infoTopic{""};
 
+  /// \brief Topic for h264 message.
+  public: std::string h264Topic{""};
+
   /// \brief Baseline for stereo cameras.
   public: double baseline{0.0};
 
   /// \brief Flag to indicate if sensor is generating data
   public: bool generatingData = false;
+
+  public:
+    std::shared_ptr<rclcpp::Node> directRosNode;
+    std::string directRosNodeName = "gz_cameras_direct";
+    std::shared_ptr<rclcpp::Publisher<sensor_msgs::msg::Image>> imagePub;
+    std::shared_ptr<rclcpp::Publisher<ffmpeg_image_transport_msgs::msg::FFMPEGPacket>> h264Pub;
 };
+
 
 //////////////////////////////////////////////////
 bool CameraSensor::CreateCamera()
@@ -345,6 +365,13 @@ CameraSensor::CameraSensor()
 //////////////////////////////////////////////////
 CameraSensor::~CameraSensor()
 {
+  if (this->dataPtr->directRosNode != nullptr) {
+    this->dataPtr->imagePub.reset();
+    this->dataPtr->h264Pub.reset();
+    DirectRosNode::ReleaseDirectROSNode(this->dataPtr->directRosNodeName, this->dataPtr.get());
+    this->dataPtr->directRosNode.reset();
+  }
+
   if (this->Scene() && this->dataPtr->camera)
   {
     this->Scene()->DestroySensor(this->dataPtr->camera);
@@ -383,25 +410,51 @@ bool CameraSensor::Load(const sdf::Sensor &_sdf)
 
   this->dataPtr->sdfSensor = _sdf;
 
-  if (this->Topic().empty())
-    this->SetTopic("/camera");
+  // if (this->Topic().empty())
+  //   this->SetTopic("/camera");
 
+  auto sdf_camera = _sdf.Element()->GetElement("camera");
+  
+  std::cout << "Camera [" << this->Name() << "] getting direct ROS node" << std::endl;
+  this->dataPtr->directRosNode = DirectRosNode::GetDirectROSNode(this->dataPtr->directRosNodeName, this->dataPtr.get());
+  if (this->dataPtr->directRosNode == nullptr) {
+     gzerr << "Failed creating direct ROS node for Camera sensor [" << this->Name() << "]" << std::endl;
+    return false;
+  }
+
+  // direct
+  if (!this->Topic().empty()) {
+    rclcpp::QoS qos(1);
+    qos.best_effort();
+    qos.transient_local();
+    this->dataPtr->imagePub = this->dataPtr->directRosNode->create_publisher<sensor_msgs::msg::Image>(this->Topic(), qos);
+  }
+
+  // direct
+  this->dataPtr->h264Topic = sdf_camera->HasElement("camera_h264_topic") ? sdf_camera->GetElement("camera_h264_topic")->GetValue()->GetAsString() : "";
+  if (!this->dataPtr->h264Topic.empty()) {
+    rclcpp::QoS qos(10);
+    qos.best_effort();
+    this->dataPtr->h264Pub = this->dataPtr->directRosNode->create_publisher<ffmpeg_image_transport_msgs::msg::FFMPEGPacket>(this->dataPtr->h264Topic, qos);
+  }
+
+  // via gz-ros-bridge
   if (!_sdf.CameraSensor()->CameraInfoTopic().empty())
   {
     this->dataPtr->infoTopic = _sdf.CameraSensor()->CameraInfoTopic();
   }
 
-  this->dataPtr->pub =
-      this->dataPtr->node.Advertise<gz::msgs::Image>(
-          this->Topic());
-  if (!this->dataPtr->pub)
-  {
-    gzerr << "Unable to create publisher on topic["
-      << this->Topic() << "].\n";
-    return false;
-  }
+  // this->dataPtr->pub =
+  //     this->dataPtr->node.Advertise<gz::msgs::Image>(
+  //         this->Topic());
+  // if (!this->dataPtr->pub)
+  // {
+  //   gzerr << "Unable to create publisher on topic["
+  //     << this->Topic() << "].\n";
+  //   return false;
+  // }
 
-  gzdbg << "Camera images for [" << this->Name() << "] advertised on ["
+  gzdbg << "Camera images for [" << this->Name() << "] advertised on ROS topic ["
          << this->Topic() << "]" << std::endl;
 
   if (_sdf.CameraSensor()->Triggered())
@@ -417,6 +470,7 @@ bool CameraSensor::Load(const sdf::Sensor &_sdf)
 
   if (!this->AdvertiseInfo())
     return false;
+
 
   if (this->Scene())
     this->CreateCamera();
@@ -459,6 +513,22 @@ void CameraSensor::SetScene(gz::rendering::ScenePtr _scene)
   }
 }
 
+const int NS_TO_SEC = 1000000000;
+void setCurrentStamp(builtin_interfaces::msg::Time *stamp,  std::chrono::steady_clock::duration timestamp) {
+    // Split into seconds and nanoseconds
+    // gz::msgs::Time ret;
+    // Set(&ret, timestamp);
+    auto seconds = std::chrono::duration_cast<std::chrono::seconds>(timestamp);
+    std::int32_t sec = static_cast<std::int32_t>(seconds.count());
+
+    // Get remaining nanoseconds
+    auto nanoseconds = std::chrono::duration_cast<std::chrono::nanoseconds>(timestamp - seconds);
+    std::uint32_t nsec = static_cast<std::uint32_t>(nanoseconds.count());
+
+    stamp->sec = sec;
+    stamp->nanosec = nsec;
+}
+
 //////////////////////////////////////////////////
 bool CameraSensor::Update(const std::chrono::steady_clock::duration &_now)
 {
@@ -483,9 +553,8 @@ bool CameraSensor::Update(const std::chrono::steady_clock::duration &_now)
     this->PublishInfo(_now);
   }
 
-  if (!this->dataPtr->pub.HasConnections() &&
-      this->dataPtr->imageEvent.ConnectionCount() <= 0 &&
-      !this->dataPtr->saveImage)
+  auto hasImageConnections = this->HasImageConnections();
+  if (!hasImageConnections && !this->dataPtr->saveImage)
   {
     if (this->dataPtr->generatingData)
     {
@@ -506,101 +575,118 @@ bool CameraSensor::Update(const std::chrono::steady_clock::duration &_now)
     }
   }
 
-  if (this->HasImageConnections() || this->dataPtr->saveImage)
+  if (hasImageConnections || this->dataPtr->saveImage)
   {
     // generate sensor data
+    // std::cout << "Camera [" << this->Name() << "] rendering..." << std::endl;
     this->Render();
     {
       GZ_PROFILE("CameraSensor::Update Copy image");
       this->dataPtr->camera->Copy(this->dataPtr->image);
     }
-
+    
     unsigned int width = this->dataPtr->camera->ImageWidth();
     unsigned int height = this->dataPtr->camera->ImageHeight();
     unsigned char *data = this->dataPtr->image.Data<unsigned char>();
 
-    gz::common::Image::PixelFormatType
-        format{common::Image::UNKNOWN_PIXEL_FORMAT};
-    msgs::PixelFormatType msgsPixelFormat =
-      msgs::PixelFormatType::UNKNOWN_PIXEL_FORMAT;
+    // gz::common::Image::PixelFormatType
+    //     format{common::Image::UNKNOWN_PIXEL_FORMAT};
+    // msgs::PixelFormatType msgsPixelFormat =
+    //   msgs::PixelFormatType::UNKNOWN_PIXEL_FORMAT;
 
+    std::string enc = "unknown";
     switch (this->dataPtr->camera->ImageFormat())
     {
       case rendering::PF_R8G8B8:
-        format = common::Image::RGB_INT8;
-        msgsPixelFormat = msgs::PixelFormatType::RGB_INT8;
+        enc = "rgb8";
+        // format = common::Image::RGB_INT8;
+        // msgsPixelFormat = msgs::PixelFormatType::RGB_INT8;
         break;
       case rendering::PF_L8:
-        format = common::Image::L_INT8;
-        msgsPixelFormat = msgs::PixelFormatType::L_INT8;
+        enc = "mono8";
+        // format = common::Image::L_INT8;
+        // msgsPixelFormat = msgs::PixelFormatType::L_INT8;
         break;
       case rendering::PF_L16:
-        format = common::Image::L_INT16;
-        msgsPixelFormat = msgs::PixelFormatType::L_INT16;
+        enc = "mono16";
+        // format = common::Image::L_INT16;
+        // msgsPixelFormat = msgs::PixelFormatType::L_INT16;
         break;
       case rendering::PF_BAYER_RGGB8:
-        format = common::Image::BAYER_RGGB8;
-        msgsPixelFormat = msgs::PixelFormatType::BAYER_RGGB8;
+        enc = "rggb8";
+        // format = common::Image::BAYER_RGGB8;
+        // msgsPixelFormat = msgs::PixelFormatType::BAYER_RGGB8;
         break;
       case rendering::PF_BAYER_BGGR8:
-        format = common::Image::BAYER_BGGR8;
-        msgsPixelFormat = msgs::PixelFormatType::BAYER_BGGR8;
+        enc = "bggr8";
+        // format = common::Image::BAYER_BGGR8;
+        // msgsPixelFormat = msgs::PixelFormatType::BAYER_BGGR8;
         break;
       case rendering::PF_BAYER_GBRG8:
-        format = common::Image::BAYER_GBRG8;
-        msgsPixelFormat = msgs::PixelFormatType::BAYER_GBRG8;
+        enc = "gbrg8";
+        // format = common::Image::BAYER_GBRG8;
+        // msgsPixelFormat = msgs::PixelFormatType::BAYER_GBRG8;
         break;
       case rendering::PF_BAYER_GRBG8:
-        format = common::Image::BAYER_GRBG8;
-        msgsPixelFormat = msgs::PixelFormatType::BAYER_GRBG8;
+        enc = "grbg8";
+        // format = common::Image::BAYER_GRBG8;
+        // msgsPixelFormat = msgs::PixelFormatType::BAYER_GRBG8;
         break;
       default:
-        gzerr << "Unsupported pixel format ["
-          << this->dataPtr->camera->ImageFormat() << "]\n";
+        gzerr << "Unsupported pixel format [" << this->dataPtr->camera->ImageFormat() << "]\n";
         break;
     }
 
     // create message
-    msgs::Image msg;
+    sensor_msgs::msg::Image msg;
     {
       GZ_PROFILE("CameraSensor::Update Message");
-      msg.set_width(width);
-      msg.set_height(height);
-      msg.set_step(width * rendering::PixelUtil::BytesPerPixel(
-                   this->dataPtr->camera->ImageFormat()));
-      msg.set_pixel_format_type(msgsPixelFormat);
-      *msg.mutable_header()->mutable_stamp() = msgs::Convert(_now);
-      auto frame = msg.mutable_header()->add_data();
-      frame->set_key("frame_id");
-      frame->add_value(this->dataPtr->opticalFrameId);
-      msg.set_data(data, this->dataPtr->camera->ImageMemorySize());
+      msg.header = std_msgs::msg::Header();
+      msg.header.frame_id = this->dataPtr->opticalFrameId;
+      // msg.header.stamp.sec = ;
+      // msg.header.stamp.nanosec = ;
+      setCurrentStamp(&msg.header.stamp, _now);
+      msg.encoding = enc;
+      msg.width = width;
+      msg.height = height;
+      msg.data.assign(data, data + this->dataPtr->image.MemorySize());
+      // msg.set_width(width);
+      // msg.set_height(height);
+      // msg.set_step(width * rendering::PixelUtil::BytesPerPixel(
+      //              this->dataPtr->camera->ImageFormat()));
+      // msg.set_pixel_format_type(msgsPixelFormat);
+      // *msg.mutable_header()->mutable_stamp() = msgs::Convert(_now);
+      // auto frame = msg.mutable_header()->add_data();
+      // frame->set_key("frame_id");
+      // frame->add_value(this->dataPtr->opticalFrameId);
+      // msg.set_data(data, this->dataPtr->camera->ImageMemorySize());
     }
 
     // publish the image message
     {
-      this->AddSequence(msg.mutable_header());
+      // this->AddSequence(msg.mutable_header());
       GZ_PROFILE("CameraSensor::Update Publish");
-      this->dataPtr->pub.Publish(msg);
+      this->dataPtr->imagePub->publish(msg);
     }
 
     // Trigger callbacks.
-    if (this->dataPtr->imageEvent.ConnectionCount() > 0)
-    {
-      try
-      {
-        this->dataPtr->imageEvent(msg);
-      }
-      catch(...)
-      {
-        gzerr << "Exception thrown in an image callback.\n";
-      }
-    }
+    // if (this->dataPtr->imageEvent.ConnectionCount() > 0)
+    // {
+    //   try
+    //   {
+    //     this->dataPtr->imageEvent(msg);
+    //   }
+    //   catch(...)
+    //   {
+    //     gzerr << "Exception thrown in an image callback.\n";
+    //   }
+    // }
 
     // Save image
-    if (this->dataPtr->saveImage)
-    {
-      this->dataPtr->SaveImage(data, width, height, format);
-    }
+    // if (this->dataPtr->saveImage)
+    // {
+    //   this->dataPtr->SaveImage(data, width, height, format);
+    // }
   }
 
   return true;
@@ -659,6 +745,12 @@ std::string CameraSensor::InfoTopic() const
 }
 
 //////////////////////////////////////////////////
+std::string CameraSensor::H264Topic() const
+{
+  return this->dataPtr->h264Topic;
+}
+
+//////////////////////////////////////////////////
 bool CameraSensor::AdvertiseInfo()
 {
   if (this->dataPtr->infoTopic.empty())
@@ -682,8 +774,7 @@ bool CameraSensor::AdvertiseInfo(const std::string &_topic)
   this->dataPtr->infoTopic = _topic;
 
   this->dataPtr->infoPub =
-      this->dataPtr->node.Advertise<gz::msgs::CameraInfo>(
-      this->dataPtr->infoTopic);
+      this->dataPtr->node.Advertise<gz::msgs::CameraInfo>(this->dataPtr->infoTopic);
   if (!this->dataPtr->infoPub)
   {
     gzerr << "Unable to create publisher on topic ["
@@ -820,7 +911,8 @@ bool CameraSensor::HasConnections() const
 bool CameraSensor::HasImageConnections() const
 {
   return (this->dataPtr->pub && this->dataPtr->pub.HasConnections()) ||
-         this->dataPtr->imageEvent.ConnectionCount() > 0u;
+         this->dataPtr->imageEvent.ConnectionCount() > 0u ||
+         (this->dataPtr->imagePub && this->dataPtr->imagePub->get_subscription_count() > 0);
 }
 
 //////////////////////////////////////////////////
