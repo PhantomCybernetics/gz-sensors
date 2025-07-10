@@ -18,6 +18,7 @@
 #include <gz/msgs/camera_info.pb.h>
 #include <gz/msgs/image.pb.h>
 
+#include <libavutil/pixfmt.h>
 #include <mutex>
 #include <ostream>
 #include <string>
@@ -44,7 +45,9 @@
 #include "gz/sensors/SensorTypes.hh"
 
 #include <gz/rendering/Utils.hh>
+
 #include "gz/sensors/DirectRosNode.hh"
+#include "gz/sensors/FFmpegEncoder.hh"
 #include "std_msgs/msg/header.hpp"
 #include <sensor_msgs/msg/image.hpp>
 #include <ffmpeg_image_transport_msgs/msg/ffmpeg_packet.hpp>
@@ -209,6 +212,11 @@ class gz::sensors::CameraSensorPrivate
     std::string directRosNodeName = "gz_cameras_direct";
     std::shared_ptr<rclcpp::Publisher<sensor_msgs::msg::Image>> imagePub;
     std::shared_ptr<rclcpp::Publisher<ffmpeg_image_transport_msgs::msg::FFMPEGPacket>> h264Pub;
+    std::shared_ptr<phntm::FFmpegEncoder> encoder;
+    std::string encoder_hw_device = "cuda"; // "vaapi", "" = sw
+    int encoder_thread_count = 2;
+    int encoder_gop_size = 60;
+    int encoder_bit_rate = 5000000;
 };
 
 
@@ -370,6 +378,7 @@ CameraSensor::~CameraSensor()
     this->dataPtr->h264Pub.reset();
     DirectRosNode::ReleaseDirectROSNode(this->dataPtr->directRosNodeName, this->dataPtr.get());
     this->dataPtr->directRosNode.reset();
+    this->dataPtr->encoder.reset();
   }
 
   if (this->Scene() && this->dataPtr->camera)
@@ -425,16 +434,16 @@ bool CameraSensor::Load(const sdf::Sensor &_sdf)
   // direct
   if (!this->Topic().empty()) {
     rclcpp::QoS qos(1);
-    qos.best_effort();
-    qos.transient_local();
+    // qos.best_effort();
+    // qos.transient_local();
     this->dataPtr->imagePub = this->dataPtr->directRosNode->create_publisher<sensor_msgs::msg::Image>(this->Topic(), qos);
   }
 
   // direct
   this->dataPtr->h264Topic = sdf_camera->HasElement("camera_h264_topic") ? sdf_camera->GetElement("camera_h264_topic")->GetValue()->GetAsString() : "";
   if (!this->dataPtr->h264Topic.empty()) {
-    rclcpp::QoS qos(10);
-    qos.best_effort();
+    rclcpp::QoS qos(1);
+    // qos.best_effort();
     this->dataPtr->h264Pub = this->dataPtr->directRosNode->create_publisher<ffmpeg_image_transport_msgs::msg::FFMPEGPacket>(this->dataPtr->h264Topic, qos);
   }
 
@@ -554,7 +563,9 @@ bool CameraSensor::Update(const std::chrono::steady_clock::duration &_now)
   }
 
   auto hasImageConnections = this->HasImageConnections();
-  if (!hasImageConnections && !this->dataPtr->saveImage)
+  auto hasH264Connections = this->HasH264Connections();
+
+  if (!hasImageConnections && !hasH264Connections)
   {
     if (this->dataPtr->generatingData)
     {
@@ -575,7 +586,7 @@ bool CameraSensor::Update(const std::chrono::steady_clock::duration &_now)
     }
   }
 
-  if (hasImageConnections || this->dataPtr->saveImage)
+  if (hasImageConnections || hasH264Connections)
   {
     // generate sensor data
     // std::cout << "Camera [" << this->Name() << "] rendering..." << std::endl;
@@ -594,79 +605,131 @@ bool CameraSensor::Update(const std::chrono::steady_clock::duration &_now)
     // msgs::PixelFormatType msgsPixelFormat =
     //   msgs::PixelFormatType::UNKNOWN_PIXEL_FORMAT;
 
-    std::string enc = "unknown";
+    std::string camera_image_format = "";
+    AVPixelFormat opencv_format = AV_PIX_FMT_NONE;
+    AVPixelFormat codec_input_format = AV_PIX_FMT_NV12;
     switch (this->dataPtr->camera->ImageFormat())
     {
       case rendering::PF_R8G8B8:
-        enc = "rgb8";
-        // format = common::Image::RGB_INT8;
-        // msgsPixelFormat = msgs::PixelFormatType::RGB_INT8;
+        camera_image_format = "rgb8";
+        opencv_format = AV_PIX_FMT_RGB24;
+        codec_input_format = AV_PIX_FMT_RGB0;
         break;
       case rendering::PF_L8:
-        enc = "mono8";
-        // format = common::Image::L_INT8;
-        // msgsPixelFormat = msgs::PixelFormatType::L_INT8;
+        camera_image_format = "mono8";
+        opencv_format = AV_PIX_FMT_GRAY8;
+        codec_input_format = AV_PIX_FMT_GRAY8;
         break;
       case rendering::PF_L16:
-        enc = "mono16";
-        // format = common::Image::L_INT16;
-        // msgsPixelFormat = msgs::PixelFormatType::L_INT16;
+        camera_image_format = "mono16";
+        opencv_format = AV_PIX_FMT_GRAY16;
+        codec_input_format = AV_PIX_FMT_GRAY16;
         break;
       case rendering::PF_BAYER_RGGB8:
-        enc = "rggb8";
-        // format = common::Image::BAYER_RGGB8;
-        // msgsPixelFormat = msgs::PixelFormatType::BAYER_RGGB8;
+        camera_image_format = "rggb8";
         break;
       case rendering::PF_BAYER_BGGR8:
-        enc = "bggr8";
-        // format = common::Image::BAYER_BGGR8;
-        // msgsPixelFormat = msgs::PixelFormatType::BAYER_BGGR8;
+        camera_image_format = "bggr8";
         break;
       case rendering::PF_BAYER_GBRG8:
-        enc = "gbrg8";
-        // format = common::Image::BAYER_GBRG8;
-        // msgsPixelFormat = msgs::PixelFormatType::BAYER_GBRG8;
+        camera_image_format = "gbrg8";
         break;
       case rendering::PF_BAYER_GRBG8:
-        enc = "grbg8";
-        // format = common::Image::BAYER_GRBG8;
-        // msgsPixelFormat = msgs::PixelFormatType::BAYER_GRBG8;
+        camera_image_format = "grbg8";
         break;
       default:
-        gzerr << "Unsupported pixel format [" << this->dataPtr->camera->ImageFormat() << "]\n";
         break;
     }
-
-    // create message
-    sensor_msgs::msg::Image msg;
-    {
-      GZ_PROFILE("CameraSensor::Update Message");
-      msg.header = std_msgs::msg::Header();
-      msg.header.frame_id = this->dataPtr->opticalFrameId;
-      // msg.header.stamp.sec = ;
-      // msg.header.stamp.nanosec = ;
-      setCurrentStamp(&msg.header.stamp, _now);
-      msg.encoding = enc;
-      msg.width = width;
-      msg.height = height;
-      msg.data.assign(data, data + this->dataPtr->image.MemorySize());
-      // msg.set_width(width);
-      // msg.set_height(height);
-      // msg.set_step(width * rendering::PixelUtil::BytesPerPixel(
-      //              this->dataPtr->camera->ImageFormat()));
-      // msg.set_pixel_format_type(msgsPixelFormat);
-      // *msg.mutable_header()->mutable_stamp() = msgs::Convert(_now);
-      // auto frame = msg.mutable_header()->add_data();
-      // frame->set_key("frame_id");
-      // frame->add_value(this->dataPtr->opticalFrameId);
-      // msg.set_data(data, this->dataPtr->camera->ImageMemorySize());
+    if (camera_image_format.empty()) {
+      gzerr << "Unsupported pixel format [" << this->dataPtr->camera->ImageFormat() << "]" << " \n";
+      return false;
     }
 
-    // publish the image message
-    {
-      // this->AddSequence(msg.mutable_header());
-      GZ_PROFILE("CameraSensor::Update Publish");
-      this->dataPtr->imagePub->publish(msg);
+    if (hasH264Connections) {
+
+       // make encoder
+        if (this->dataPtr->encoder.get() == nullptr) {
+
+          std::cout << "Camera [" << this->Name() << "] output image format = " << camera_image_format << std::endl;
+
+          RCLCPP_INFO(this->dataPtr->directRosNode->get_logger(), "Making encoder %dx%d for %s with hw_device=%s",
+                      width, height, this->H264Topic().c_str(), this->dataPtr->encoder_hw_device.c_str());
+          try {
+              this->dataPtr->encoder = std::make_shared<phntm::FFmpegEncoder>(width, height,
+                                              camera_image_format, opencv_format, codec_input_format,
+                                              this->OpticalFrameId(), this->H264Topic(), this->dataPtr->directRosNode,
+                                              this->dataPtr->encoder_hw_device,
+                                              this->dataPtr->encoder_thread_count,
+                                              this->dataPtr->encoder_gop_size,
+                                              this->dataPtr->encoder_bit_rate,
+                                              std::bind(&CameraSensor::onEncodedFrame, this, std::placeholders::_1));
+          } catch (const std::runtime_error & ex) {
+              this->dataPtr->encoder.reset();
+              // this->encoder_error = true;
+              std::cout << "Error making encoder" << std::endl;
+              RCLCPP_ERROR(this->dataPtr->directRosNode->get_logger(), "%s", ex.what());
+              return false;
+          }
+        }
+        if (this->dataPtr->encoder != nullptr) {
+          cv::Mat frame;
+          switch (this->dataPtr->camera->ImageFormat())
+          {
+            case rendering::PF_R8G8B8:
+              frame = cv::Mat(height, width, CV_8UC3, data);
+              break;
+            case rendering::PF_L8: 
+              frame = cv::Mat(height, width, CV_8UC1, data);
+              break;
+            case rendering::PF_L16: {
+              cv::Mat mono16(height, width, CV_16UC1, data);
+              cv::Mat mono8;
+              mono16.convertTo(mono8, CV_8UC1, 255.0 / 255.0); // Convert to 8-bit (0-255 range)
+              cv::applyColorMap(mono8, frame,  cv::COLORMAP_INFERNO); // Apply color map
+              break;
+            }
+            default:
+              break;
+          }
+
+          std_msgs::msg::Header header;
+          header = std_msgs::msg::Header();
+          header.frame_id = this->dataPtr->opticalFrameId;
+          setCurrentStamp(&header.stamp, _now);
+          this->dataPtr->encoder->encodeFrame(frame, header, true);
+        }
+    }
+
+    if (hasImageConnections) {
+      // create ROS raw message
+      sensor_msgs::msg::Image msg;
+      {
+        GZ_PROFILE("CameraSensor::Update Message");
+        msg.header = std_msgs::msg::Header();
+        msg.header.frame_id = this->dataPtr->opticalFrameId;
+        // msg.header.stamp.sec = ;
+        // msg.header.stamp.nanosec = ;
+        setCurrentStamp(&msg.header.stamp, _now);
+        msg.encoding = camera_image_format;
+        msg.width = width;
+        msg.height = height;
+        msg.data.assign(data, data + this->dataPtr->image.MemorySize());
+        // msg.set_width(width);
+        // msg.set_height(height);
+        // msg.set_step(width * rendering::PixelUtil::BytesPerPixel(
+        //              this->dataPtr->camera->ImageFormat()));
+        // msg.set_pixel_format_type(msgsPixelFormat);
+        // *msg.mutable_header()->mutable_stamp() = msgs::Convert(_now);
+        // auto frame = msg.mutable_header()->add_data();
+        // frame->set_key("frame_id");
+        // frame->add_value(this->dataPtr->opticalFrameId);
+        // msg.set_data(data, this->dataPtr->camera->ImageMemorySize());
+     
+        // publish the image message
+        // this->AddSequence(msg.mutable_header());
+        GZ_PROFILE("CameraSensor::Update Publish");
+        this->dataPtr->imagePub->publish(msg);
+      }
     }
 
     // Trigger callbacks.
@@ -690,6 +753,13 @@ bool CameraSensor::Update(const std::chrono::steady_clock::duration &_now)
   }
 
   return true;
+}
+
+// on subscriber thread
+void CameraSensor::onEncodedFrame(const std::shared_ptr<ffmpeg_image_transport_msgs::msg::FFMPEGPacket> msg) {
+    // ffmpeg_image_transport_msgs::msg::FFMPEGPacket msg_out = 
+    // std::cout << this->Name() << " publishing encoded frame" << std::endl;
+    this->dataPtr->h264Pub->publish(*msg.get());
 }
 
 //////////////////////////////////////////////////
@@ -904,15 +974,20 @@ double CameraSensor::Baseline() const
 //////////////////////////////////////////////////
 bool CameraSensor::HasConnections() const
 {
-  return this->HasImageConnections() || this->HasInfoConnections();
+  return this->HasImageConnections() || this->HasH264Connections() || this->HasInfoConnections();
 }
 
 //////////////////////////////////////////////////
+//////////////////////////////////////////////////
 bool CameraSensor::HasImageConnections() const
 {
-  return (this->dataPtr->pub && this->dataPtr->pub.HasConnections()) ||
-         this->dataPtr->imageEvent.ConnectionCount() > 0u ||
-         (this->dataPtr->imagePub && this->dataPtr->imagePub->get_subscription_count() > 0);
+  return (this->dataPtr->imagePub && this->dataPtr->imagePub->get_subscription_count() > 0);
+}
+
+//////////////////////////////////////////////////
+bool CameraSensor::HasH264Connections() const
+{
+  return (this->dataPtr->h264Pub && this->dataPtr->h264Pub->get_subscription_count() > 0);
 }
 
 //////////////////////////////////////////////////

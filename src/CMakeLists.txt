@@ -68,8 +68,9 @@ find_package(ffmpeg_image_transport_msgs REQUIRED)
 find_package(sensor_msgs REQUIRED)
 find_package(std_srvs REQUIRED)
 #find_package(${rendering_target} REQUIRED)
+find_package(OpenCV REQUIRED)
 
-set(camera_sources CameraSensor.cc DirectRosNode.cc)
+set(camera_sources CameraSensor.cc DirectRosNode.cc FFmpegEncoder.cc)
 gz_add_component(camera
   SOURCES ${camera_sources}
   DEPENDS_ON_COMPONENTS rendering
@@ -107,6 +108,9 @@ target_include_directories(${camera_target} PUBLIC
     /opt/ros/jazzy/include/rosgraph_msgs
     /opt/ros/jazzy/include/rosidl_typesupport_cpp
     /opt/ros/jazzy/include/rosidl_typesupport_c
+    ${OpenCV_INCLUDE_DIRS}
+    ${FFMPEG_INCLUDE_DIRS}
+    /usr/include/opencv4
 )
 # custom compile definitions since the one provided automatically is versioned and will
 # make the code need to change with every major version
@@ -120,12 +124,25 @@ ament_target_dependencies(${camera_target}
     ffmpeg_image_transport_msgs
 )
 
+set(FFMPEG_LINK_FLAGS
+    -lavformat
+    -lavcodec
+    -lavutil
+    -lswscale
+    -lswresample
+    -lavdevice
+    -lavfilter
+)
+
 target_link_libraries(${camera_target}
   PUBLIC
     ${rendering_target}
   PRIVATE
     gz-msgs${GZ_MSGS_VER}::gz-msgs${GZ_MSGS_VER}
     gz-transport${GZ_TRANSPORT_VER}::gz-transport${GZ_TRANSPORT_VER}
+    ${OpenCV_LIBS}
+    ${FFMPEG_LINK_FLAGS}
+    ${AVFORMAT}
 )
 
 set(depth_camera_sources DepthCameraSensor.cc)

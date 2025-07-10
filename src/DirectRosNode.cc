@@ -10,7 +10,7 @@ std::mutex DirectRosNode::mutex;
 
 std::shared_ptr<rclcpp::Node>  gz::sensors::DirectRosNode::GetDirectROSNode(std::string node_name, void* owner_ptr) {
 
-  std::lock_guard<std::mutex> lock(mutex);
+  std::lock_guard<std::mutex> lock(DirectRosNode::mutex);
 
   // if (!DirectRosNode::rclcpp_intiated) {
   //   DirectRosNode::rclcpp_intiated = true;
@@ -29,6 +29,7 @@ std::shared_ptr<rclcpp::Node>  gz::sensors::DirectRosNode::GetDirectROSNode(std:
     node_ref = &DirectRosNode::directROSNodes.at(node_name);
   }
 
+  std::cout << "Adding owner ref for " << node_name << std::endl;
   if (std::find(node_ref->owners.begin(), node_ref->owners.end(), owner_ptr) == node_ref->owners.end()) {
     node_ref->owners.push_back(owner_ptr);
   }
@@ -39,7 +40,7 @@ std::shared_ptr<rclcpp::Node>  gz::sensors::DirectRosNode::GetDirectROSNode(std:
 
 void gz::sensors::DirectRosNode::ReleaseDirectROSNode(std::string node_name, void* owner_ptr) {
 
-  std::lock_guard<std::mutex> lock(mutex);
+  std::lock_guard<std::mutex> lock(DirectRosNode::mutex);
 
   if (DirectRosNode::directROSNodes.find(node_name) == DirectRosNode::directROSNodes.end())
     return;

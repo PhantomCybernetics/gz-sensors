@@ -17,7 +17,8 @@ namespace gz
         public:
             static std::shared_ptr<rclcpp::Node> GetDirectROSNode(std::string node_name, void* owner_ptr);
             static void ReleaseDirectROSNode(std::string node_name, void* owner_ptr);
-
+            static std::mutex mutex;
+            
         private:
 
             struct NodeRef {
@@ -26,7 +27,7 @@ namespace gz
             };
 
             static std::map<std::string, NodeRef> directROSNodes;
-            static std::mutex mutex;
+            
             // static bool rclcpp_intiated;
 
     };

@@ -45,6 +45,7 @@
 #include "gz/sensors/RenderingSensor.hh"
 
 #include <rclcpp/node.hpp>
+#include <ffmpeg_image_transport_msgs/msg/detail/ffmpeg_packet__struct.hpp>
 
 namespace gz
 {
@@ -145,6 +146,11 @@ namespace gz
       /// \brief Check if there are any image subscribers
       /// \return True if there are image subscribers, false otherwise
       public: virtual bool HasImageConnections() const;
+
+      /// \brief Check if there are any h264 subscribers
+      /// \return True if there are h264 subscribers, false otherwise
+      public: virtual bool HasH264Connections() const;
+      public: void onEncodedFrame(const std::shared_ptr<ffmpeg_image_transport_msgs::msg::FFMPEGPacket> msg);
 
       /// \brief Check if there are any info subscribers
       /// \return True if there are info subscribers, false otherwise
