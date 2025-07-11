@@ -18,6 +18,7 @@
 #include <gz/msgs/camera_info.pb.h>
 #include <gz/msgs/image.pb.h>
 
+#include <gz/rendering/PixelFormat.hh>
 #include <libavutil/pixfmt.h>
 #include <mutex>
 #include <ostream>
@@ -213,10 +214,11 @@ class gz::sensors::CameraSensorPrivate
     std::shared_ptr<rclcpp::Publisher<sensor_msgs::msg::Image>> imagePub;
     std::shared_ptr<rclcpp::Publisher<ffmpeg_image_transport_msgs::msg::FFMPEGPacket>> h264Pub;
     std::shared_ptr<phntm::FFmpegEncoder> encoder;
+    
     std::string encoder_hw_device = "cuda"; // "vaapi", "" = sw
-    int encoder_thread_count = 2;
+    int encoder_thread_count = 4;
     int encoder_gop_size = 60;
-    int encoder_bit_rate = 5000000;
+    int encoder_bit_rate = 1000000;
 };
 
 
@@ -319,6 +321,9 @@ bool CameraSensor::CreateCamera()
     case sdf::PixelFormatType::RGB_INT8:
       this->dataPtr->camera->SetImageFormat(rendering::PF_R8G8B8);
       break;
+    case sdf::PixelFormatType::BGR_INT8:
+      this->dataPtr->camera->SetImageFormat(rendering::PF_B8G8R8);
+      break;
     case sdf::PixelFormatType::L_INT8:
       this->dataPtr->camera->SetImageFormat(rendering::PF_L8);
       break;
@@ -335,12 +340,13 @@ bool CameraSensor::CreateCamera()
       this->dataPtr->camera->SetImageFormat(rendering::PF_BAYER_GBRG8);
       break;
     case sdf::PixelFormatType::BAYER_GRBG8:
-      this->dataPtr->camera->SetImageFormat(rendering::PF_BAYER_GRBG8);
+      
       break;
-    default:
-      gzerr << "Unsupported pixel format ["
-        << static_cast<int>(pixelFormat) << "]\n";
+    default: {
+      auto fmt_name = phntm::FFmpegEncoder::GetGZPixelFormatName(pixelFormat);
+      RCLCPP_ERROR(this->dataPtr->directRosNode->get_logger(), "Rendering camera %s doesn't support selected pixel format: %s", this->Name().c_str(), fmt_name.c_str());
       break;
+    }
   }
 
   this->UpdateLensIntrinsicsAndProjection(this->dataPtr->camera,
@@ -615,6 +621,11 @@ bool CameraSensor::Update(const std::chrono::steady_clock::duration &_now)
         opencv_format = AV_PIX_FMT_RGB24;
         codec_input_format = AV_PIX_FMT_RGB0;
         break;
+      case rendering::PF_B8G8R8:
+        camera_image_format = "bgr8";
+        opencv_format = AV_PIX_FMT_BGR24;
+        codec_input_format = AV_PIX_FMT_BGR0;
+        break;
       case rendering::PF_L8:
         camera_image_format = "mono8";
         opencv_format = AV_PIX_FMT_GRAY8;
@@ -678,6 +689,9 @@ bool CameraSensor::Update(const std::chrono::steady_clock::duration &_now)
             case rendering::PF_R8G8B8:
               frame = cv::Mat(height, width, CV_8UC3, data);
               break;
+            case rendering::PF_B8G8R8:
+              frame = cv::Mat(height, width, CV_8UC3, data);
+              break;
             case rendering::PF_L8: 
               frame = cv::Mat(height, width, CV_8UC1, data);
               break;
@@ -689,6 +703,7 @@ bool CameraSensor::Update(const std::chrono::steady_clock::duration &_now)
               break;
             }
             default:
+              RCLCPP_ERROR(this->dataPtr->directRosNode->get_logger(), "[%s] Received unsupported pixel format from camera %d", this->Name().c_str(), this->dataPtr->camera->ImageFormat());
               break;
           }
 

@@ -2,6 +2,7 @@
 // #include "phntm_bridge/lib.hpp"
 // #include "phntm_bridge/const.hpp"
 
+#include <algorithm>
 #include <cstddef>
 #include <functional>
 #include <libavcodec/avcodec.h>
@@ -17,7 +18,9 @@
 
 namespace phntm {
 
-   FFmpegEncoder::FFmpegEncoder(int src_frame_width, int src_frame_height, std::string src_frame_encoding, AVPixelFormat opencv_format, AVPixelFormat codec_input_format, std::string output_frame_id, std::string output_topic, std::shared_ptr<rclcpp::Node> ros_node, std::string& hw_device, int thread_count, int gop_size, int bit_rate, PacketCallback callback)
+    std::vector<AVCodecID> FFmpegEncoder::encoder_input_logged;
+
+    FFmpegEncoder::FFmpegEncoder(int src_frame_width, int src_frame_height, std::string src_frame_encoding, AVPixelFormat opencv_format, AVPixelFormat codec_input_format, std::string output_frame_id, std::string output_topic, std::shared_ptr<rclcpp::Node> ros_node, std::string& hw_device, int thread_count, int gop_size, int bit_rate, PacketCallback callback)
         : width(src_frame_width), height(src_frame_height), src_encoding(src_frame_encoding), packet_callback(callback), frame_id(output_frame_id), topic(output_topic), node(ros_node) {
 
         // Initialize FFmpeg
@@ -47,15 +50,6 @@ namespace phntm {
             if (!codec) codec = avcodec_find_encoder_by_name("h264_amf"); // AMD
         }
 
-        for (int i = 0;; i++) {
-            const AVCodecHWConfig *config = avcodec_get_hw_config(codec, i);
-            if (!config)
-                break; // no more configs
-
-            // config->pix_fmt is a supported pixel format
-            RCLCPP_INFO(this->node->get_logger(), "[AVCodec] Supported hw pixel format: %s", av_get_pix_fmt_name(config->pix_fmt));
-        }
-        
         if (!codec) {
             codec = avcodec_find_encoder(AV_CODEC_ID_H264); // Fallback to software
             //log("["+this->toString()+"] Warning: Software h.264 encoding selected for " + topic+", this is rather slow and expensive");
@@ -65,7 +59,26 @@ namespace phntm {
         if (!codec) {
             throw std::runtime_error("["+this->toString()+"] H.264 encoder not found for " + topic);
         }
+
+        // output supported input pixel formats for each codec
+        if (std::find(FFmpegEncoder::encoder_input_logged.begin(), FFmpegEncoder::encoder_input_logged.end(), codec->id) == FFmpegEncoder::encoder_input_logged.end()) {
+
+            FFmpegEncoder::encoder_input_logged.push_back(codec->id); //only once
+            if (codec->pix_fmts) {
+                const enum AVPixelFormat *p = codec->pix_fmts;
+                while (*p != AV_PIX_FMT_NONE) {
+                    RCLCPP_INFO(this->node->get_logger(), "[AVCodec %s] Supported input pixel format: %s", codec->name, av_get_pix_fmt_name(*p));
+                    // Optionally, use av_get_pix_fmt_name(*p) to print the name
+                    p++;
+                }
+            } else {
+                RCLCPP_WARN(this->node->get_logger(), "[AVCodec %s] No supported input pixel formats detected!", codec->name);
+            }
+        }
         
+        RCLCPP_INFO(this->node->get_logger(), "[AVCodec] OpenCV conversion format for sw-scaling: %s", av_get_pix_fmt_name(opencv_format));
+        RCLCPP_INFO(this->node->get_logger(), "[AVCodec %s] Selected input pixel format: %s", codec->name, av_get_pix_fmt_name(codec_input_format));
+
         // Set up codec context
         this->codec_ctx = avcodec_alloc_context3(codec);
         if (!this->codec_ctx) {

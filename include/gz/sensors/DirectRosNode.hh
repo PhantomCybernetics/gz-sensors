@@ -27,9 +27,6 @@ namespace gz
             };
 
             static std::map<std::string, NodeRef> directROSNodes;
-            
-            // static bool rclcpp_intiated;
-
     };
 
   }

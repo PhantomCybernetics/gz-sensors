@@ -17,6 +17,7 @@ extern "C" {
 
 #include "rclcpp/rclcpp.hpp"
 #include <thread>
+#include <sdf/sdf.hh>
 
 namespace phntm {
     class FFmpegEncoder {
@@ -28,6 +29,31 @@ namespace phntm {
         
         void encodeFrame(const cv::Mat& raw_frame, std_msgs::msg::Header header, bool debug_log);
         bool checkCompatibility(const int frame_width, const int frame_height, const std::string & frame_encoding) { return frame_width == this->width && frame_height == this->height && frame_encoding == this->src_encoding; };
+
+        static std::string GetGZPixelFormatName(sdf::PixelFormatType pixelFormat) {
+            switch (pixelFormat) {
+                case sdf::PixelFormatType::UNKNOWN_PIXEL_FORMAT: return "UNKNOWN_PIXEL_FORMAT";
+                case sdf::PixelFormatType::L_INT8: return "L_INT8";
+                case sdf::PixelFormatType::L_INT16: return "L_INT16";
+                case sdf::PixelFormatType::RGB_INT8: return "RGB_INT8";
+                case sdf::PixelFormatType::RGBA_INT8: return "RGBA_INT8";
+                case sdf::PixelFormatType::BGRA_INT8: return "BGRA_INT8";
+                case sdf::PixelFormatType::RGB_INT16: return "RGB_INT16";
+                case sdf::PixelFormatType::RGB_INT32: return "RGB_INT32";
+                case sdf::PixelFormatType::BGR_INT8: return "BGR_INT8";
+                case sdf::PixelFormatType::BGR_INT16: return "BGR_INT16";
+                case sdf::PixelFormatType::BGR_INT32: return "BGR_INT32";
+                case sdf::PixelFormatType::R_FLOAT16: return "R_FLOAT16";
+                case sdf::PixelFormatType::RGB_FLOAT16: return "RGB_FLOAT16";
+                case sdf::PixelFormatType::R_FLOAT32: return "R_FLOAT32";
+                case sdf::PixelFormatType::RGB_FLOAT32: return "RGB_FLOAT32";
+                case sdf::PixelFormatType::BAYER_RGGB8: return "BAYER_RGGB8";
+                case sdf::PixelFormatType::BAYER_BGGR8: return "BAYER_BGGR8";
+                case sdf::PixelFormatType::BAYER_GBRG8: return "BAYER_GBRG8";
+                case sdf::PixelFormatType::BAYER_GRBG8: return "BAYER_GRBG8";
+                default: return "unknown";
+            }
+        };
 
     private:
         int width, height;
@@ -56,6 +82,7 @@ namespace phntm {
         void sendFrameToEncoder(AVFrame* input_frame, bool debug_log);
         void encoderWorker();
         void flush();
+        static std::vector<AVCodecID> encoder_input_logged;
 
         std::string frame_id, topic;
         std::shared_ptr<rclcpp::Node> node;
