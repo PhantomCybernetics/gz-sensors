@@ -115,25 +115,28 @@ namespace phntm {
         }
         
         // Allocate frame
-        frame = av_frame_alloc();
-        if (!frame) {
-            throw std::runtime_error("["+this->toString()+"] Could not allocate frame for "+topic);
+        for (uint i = 0; i < this->num_frame_buffers; i++) {
+            auto frame = av_frame_alloc();
+            if (!frame) {
+                throw std::runtime_error("["+this->toString()+"] Could not allocate frame #" + std::to_string(i) + " for "+topic);
+            }
+            frame->format = this->codec_ctx->pix_fmt;
+            frame->width = width;
+            frame->height = height;
+            if (av_frame_get_buffer(frame, 0) < 0) {
+                throw std::runtime_error("["+this->toString()+"] Could not allocate frame #" + std::to_string(i) + " data for " + topic);
+            }
+            this->frame_buffers.push_back(frame);
         }
-        
-        frame->format = this->codec_ctx->pix_fmt;
-        frame->width = width;
-        frame->height = height;
-        
-        if (av_frame_get_buffer(frame, 0) < 0) {
-            throw std::runtime_error("["+this->toString()+"] Could not allocate frame data for " + topic);
-        }
-        
+    
         // Initialize color conversion context
         sws_ctx = sws_getContext(width, height, opencv_format, // OpenCV format
                                 width, height, this->codec_ctx->pix_fmt, // codec input
                                 SWS_POINT, nullptr, nullptr, nullptr);
 
         this->running = true;
+        this->scaler_thread = std::thread(&FFmpegEncoder::scalerWorker, this);
+        this->scaler_thread.detach();
         this->encoder_thread = std::thread(&FFmpegEncoder::encoderWorker, this);
         this->encoder_thread.detach();
     }
@@ -149,7 +152,7 @@ namespace phntm {
         return rtp_timestamp;
     }
 
-    void FFmpegEncoder::encodeFrame(const cv::Mat& raw_frame, std_msgs::msg::Header header, bool debug_log) {
+    void FFmpegEncoder::encodeFrame(const cv::Mat& raw_frame, std_msgs::msg::Header header) {
     
         if (raw_frame.empty()) {
             throw std::invalid_argument("["+this->toString()+"] Empty frame provided");
@@ -158,29 +161,57 @@ namespace phntm {
         if (!this->running)
             return;
 
-        const uint8_t* src_data[] = { raw_frame.data };
-        int src_linesize[] = { static_cast<int>(raw_frame.step) };
-        
-        // sw scaling here - expensive
-        sws_scale(sws_ctx, src_data, src_linesize, 0, height, 
-                frame->data, frame->linesize);
-
-        frame->pts = convertToRtpTimestamp(header.stamp.sec, header.stamp.nanosec);
-
-        // Send for encoding
-        this->sendFrameToEncoder(frame, debug_log);
-
+        auto req = ScalerRequest { raw_frame, header };
+        {
+            std::lock_guard<std::mutex> queue_lock(this->scaler_mutex);
+            this->scaler_queue.push(req);
+            this->scaler_cv.notify_one();
+        }
     }
 
-    void FFmpegEncoder::sendFrameToEncoder(AVFrame* input_frame, bool debug_log) {
-        
-        std::lock_guard<std::mutex> queue_lock(this->mutex);
-        this->queue.push(input_frame);
+    void FFmpegEncoder::scalerWorker() {
+         std::cout << "["+this->toString()+"] FFmpegEncoder scaler runnig..." << std::endl;
+
+        while (this->running) {
+
+            std::unique_lock<std::mutex> scaler_lock(this->scaler_mutex);
+            this->scaler_cv.wait(scaler_lock, [this] { return !this->scaler_queue.empty() || !this->running; });
+            if (this->scaler_queue.empty() || !this->running) 
+                break;
+            ScalerRequest req = this->scaler_queue.front();
+            this->scaler_queue.pop();
+
+            scaler_lock.unlock();
+
+            AVFrame* frame = this->frame_buffers[this->current_frame_buffer];
+            this->current_frame_buffer++;
+            if (this->current_frame_buffer == this->num_frame_buffers) {
+                this->current_frame_buffer = 0;
+            }
+            const uint8_t* src_data[] = { req.raw_frame.data };
+            int src_linesize[] = { static_cast<int>(req.raw_frame.step) };
+            
+            // sw scaling & copy here - expensive
+            sws_scale(this->sws_ctx, src_data, src_linesize, 0, this->height, 
+                    frame->data, frame->linesize);
+
+            frame->pts = convertToRtpTimestamp(req.header.stamp.sec, req.header.stamp.nanosec);
+
+            // Send for encoding
+            this->sendFrameToEncoder(frame);
+        }
+
+        std::cout << "["+this->toString()+"] FFmpegEncoder scaler stopped..." << std::endl;
+    }
+
+    void FFmpegEncoder::sendFrameToEncoder(AVFrame* input_frame) {
+        std::lock_guard<std::mutex> queue_lock(this->encoder_mutex);
+        this->encoder_queue.push(input_frame);
         this->encoder_cv.notify_one();
     }
 
     void FFmpegEncoder::flush() {
-        sendFrameToEncoder(nullptr, false);  // Flush the encoder
+        sendFrameToEncoder(nullptr);  // Flush the encoder
     }
 
     void FFmpegEncoder::encoderWorker() {
@@ -194,23 +225,23 @@ namespace phntm {
                 throw std::runtime_error("["+this->toString()+"] Could not allocate packet");
             }
 
-            std::unique_lock<std::mutex> queue_lock(this->mutex);
-            this->encoder_cv.wait(queue_lock, [this] { return !this->queue.empty() || !this->running; });
+            std::unique_lock<std::mutex> queue_lock(this->encoder_mutex);
+            this->encoder_cv.wait(queue_lock, [this] { return !this->encoder_queue.empty() || !this->running; });
 
-            if (this->queue.empty()) 
+            if (this->encoder_queue.empty()) 
                 break;
 
-            this->frame = this->queue.front();
-            this->queue.pop();
+            AVFrame* frame = this->encoder_queue.front();
+            this->encoder_queue.pop();
 
             queue_lock.unlock();
 
-            int ret = avcodec_send_frame(this->codec_ctx, this->frame);
+            int ret = avcodec_send_frame(this->codec_ctx, frame);
             if (ret < 0) {
                 throw std::runtime_error("["+this->toString()+"] Error sending frame to encoder");
             }
 
-            if (this->frame == nullptr) { // flushed
+            if (frame == nullptr) { // flushed
                 this->running = false;
                 break;
             }
@@ -245,10 +276,10 @@ namespace phntm {
                 msg->height = height;
                 msg->flags = pkt->flags;
                 msg->is_bigendian = false;
-                msg->pts = this->frame->pts; //calculated from the initial header stamp
+                msg->pts = frame->pts; //calculated from the initial header stamp
                 // frame->data.resize(pkt->size);
                 msg->data.assign(pkt->data, pkt->data + pkt->size);
-                packet_callback(msg);
+                packet_callback(msg); // produce ros message
             }
             
             av_packet_unref(pkt);
@@ -263,14 +294,19 @@ namespace phntm {
 
         this->flush(); // flush encoder, kills the thread when complete
 
-        while (this->running) {
+        while (this->running) { // flish sets to false
             std::this_thread::sleep_for(std::chrono::milliseconds(10));
         }
+        this->scaler_cv.notify_one();
         
         std::cout << "["+this->toString()+"] Claning up..." << std::endl;
         // Cleanup
-        if (this->frame)
-            av_frame_free(&this->frame);
+        for (uint i = 0; i < this->num_frame_buffers; i++) {
+            if (this->frame_buffers[i])
+                av_frame_free(&this->frame_buffers[i]);
+        }
+        this->frame_buffers.clear();
+        
         if (this->codec_ctx) {
             this->codec_ctx->hw_device_ctx = nullptr; //remove this before deallocating
             avcodec_free_context(&this->codec_ctx);
@@ -288,6 +324,5 @@ namespace phntm {
         std::cout << "["+this->toString()+"] Cleanup done." << std::endl;
     }
 
-    
 
 }

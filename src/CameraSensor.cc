@@ -155,8 +155,10 @@ class gz::sensors::CameraSensorPrivate
   /// \brief Rendering camera
   public: gz::rendering::CameraPtr camera;
 
-  /// \brief Pointer to an image to be published
-  public: gz::rendering::Image image;
+  /// \brief pool of pointers to an images to be published
+  uint num_image_buffers = 16;
+  uint current_image_buffer = 0;
+  std::vector<gz::rendering::Image> image_buffers;
 
   /// \brief Noise added to sensor data
   public: std::map<SensorNoiseType, NoisePtr> noises;
@@ -214,9 +216,9 @@ class gz::sensors::CameraSensorPrivate
     std::shared_ptr<rclcpp::Publisher<sensor_msgs::msg::Image>> imagePub;
     std::shared_ptr<rclcpp::Publisher<ffmpeg_image_transport_msgs::msg::FFMPEGPacket>> h264Pub;
     std::shared_ptr<phntm::FFmpegEncoder> encoder;
-    
+
     std::string encoder_hw_device = "cuda"; // "vaapi", "" = sw
-    int encoder_thread_count = 4;
+    int encoder_thread_count = 1;
     int encoder_gop_size = 60;
     int encoder_bit_rate = 1000000;
 };
@@ -352,7 +354,11 @@ bool CameraSensor::CreateCamera()
   this->UpdateLensIntrinsicsAndProjection(this->dataPtr->camera,
       *cameraSdf);
 
-  this->dataPtr->image = this->dataPtr->camera->CreateImage();
+  for (uint i = 0; i < this->dataPtr->num_image_buffers; i++) {
+    auto image = this->dataPtr->camera->CreateImage();
+    this->dataPtr->image_buffers.push_back(image);
+  }
+  
 
   this->Scene()->RootVisual()->AddChild(this->dataPtr->camera);
 
@@ -386,6 +392,7 @@ CameraSensor::~CameraSensor()
     this->dataPtr->directRosNode.reset();
     this->dataPtr->encoder.reset();
   }
+  this->dataPtr->image_buffers.clear();
 
   if (this->Scene() && this->dataPtr->camera)
   {
@@ -596,15 +603,22 @@ bool CameraSensor::Update(const std::chrono::steady_clock::duration &_now)
   {
     // generate sensor data
     // std::cout << "Camera [" << this->Name() << "] rendering..." << std::endl;
+
+    gz::rendering::Image * image_buffer = &this->dataPtr->image_buffers[this->dataPtr->current_image_buffer];
+    this->dataPtr->current_image_buffer++;
+    if (this->dataPtr->current_image_buffer == this->dataPtr->num_image_buffers) {
+      this->dataPtr->current_image_buffer = 0;
+    }
+
     this->Render();
     {
       GZ_PROFILE("CameraSensor::Update Copy image");
-      this->dataPtr->camera->Copy(this->dataPtr->image);
+      this->dataPtr->camera->Copy(*image_buffer); // copy here
     }
     
     unsigned int width = this->dataPtr->camera->ImageWidth();
     unsigned int height = this->dataPtr->camera->ImageHeight();
-    unsigned char *data = this->dataPtr->image.Data<unsigned char>();
+    unsigned char *data = image_buffer->Data<unsigned char>(); // no copy
 
     // gz::common::Image::PixelFormatType
     //     format{common::Image::UNKNOWN_PIXEL_FORMAT};
@@ -687,19 +701,16 @@ bool CameraSensor::Update(const std::chrono::steady_clock::duration &_now)
           switch (this->dataPtr->camera->ImageFormat())
           {
             case rendering::PF_R8G8B8:
-              frame = cv::Mat(height, width, CV_8UC3, data);
+              frame = cv::Mat(height, width, CV_8UC3, data); // no copy
               break;
             case rendering::PF_B8G8R8:
-              frame = cv::Mat(height, width, CV_8UC3, data);
+              frame = cv::Mat(height, width, CV_8UC3, data); // no copy
               break;
             case rendering::PF_L8: 
-              frame = cv::Mat(height, width, CV_8UC1, data);
+              frame = cv::Mat(height, width, CV_8UC1, data); // no copy
               break;
             case rendering::PF_L16: {
-              cv::Mat mono16(height, width, CV_16UC1, data);
-              cv::Mat mono8;
-              mono16.convertTo(mono8, CV_8UC1, 255.0 / 255.0); // Convert to 8-bit (0-255 range)
-              cv::applyColorMap(mono8, frame,  cv::COLORMAP_INFERNO); // Apply color map
+              frame = cv::Mat(height, width, CV_16UC1, data); // no copy
               break;
             }
             default:
@@ -711,7 +722,7 @@ bool CameraSensor::Update(const std::chrono::steady_clock::duration &_now)
           header = std_msgs::msg::Header();
           header.frame_id = this->dataPtr->opticalFrameId;
           setCurrentStamp(&header.stamp, _now);
-          this->dataPtr->encoder->encodeFrame(frame, header, true);
+          this->dataPtr->encoder->encodeFrame(frame, header);
         }
     }
 
@@ -728,7 +739,7 @@ bool CameraSensor::Update(const std::chrono::steady_clock::duration &_now)
         msg.encoding = camera_image_format;
         msg.width = width;
         msg.height = height;
-        msg.data.assign(data, data + this->dataPtr->image.MemorySize());
+        msg.data.assign(data, data + image_buffer->MemorySize());
         // msg.set_width(width);
         // msg.set_height(height);
         // msg.set_step(width * rendering::PixelUtil::BytesPerPixel(

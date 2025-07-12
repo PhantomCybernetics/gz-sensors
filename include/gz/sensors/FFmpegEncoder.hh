@@ -27,7 +27,7 @@ namespace phntm {
         FFmpegEncoder(int width, int height, const std::string src_encoding, AVPixelFormat opencv_format, AVPixelFormat codec_input_format, std::string frame_id, std::string topic, std::shared_ptr<rclcpp::Node> node, std::string& hw_device, int thread_count, int gop_size, int bit_rate, PacketCallback callback = nullptr);
         ~FFmpegEncoder();
         
-        void encodeFrame(const cv::Mat& raw_frame, std_msgs::msg::Header header, bool debug_log);
+        void encodeFrame(const cv::Mat& raw_frame, std_msgs::msg::Header header);
         bool checkCompatibility(const int frame_width, const int frame_height, const std::string & frame_encoding) { return frame_width == this->width && frame_height == this->height && frame_encoding == this->src_encoding; };
 
         static std::string GetGZPixelFormatName(sdf::PixelFormatType pixelFormat) {
@@ -62,30 +62,43 @@ namespace phntm {
         int64_t pts_counter = 0;
         PacketCallback packet_callback;
 
-        bool running = false;
-
-        std::thread encoder_thread;
-        std::condition_variable encoder_cv;
-
         AVFormatContext* fmt_ctx = nullptr;
-        // AVCodec* codec = nullptr;
-        // AVStream* stream = nullptr;
         AVCodecContext* codec_ctx = nullptr;
-        AVFrame* frame = nullptr;
-        std::queue<AVFrame*> queue;
-        std::mutex mutex;
         SwsContext* sws_ctx = nullptr;
-        
+
         AVBufferRef* hw_device_ctx = nullptr;
         enum AVHWDeviceType hw_device_type = AV_HWDEVICE_TYPE_NONE;
 
-        void sendFrameToEncoder(AVFrame* input_frame, bool debug_log);
-        void encoderWorker();
-        void flush();
-        static std::vector<AVCodecID> encoder_input_logged;
-
         std::string frame_id, topic;
         std::shared_ptr<rclcpp::Node> node;
+        bool running = false;
+
+        struct ScalerRequest {
+            cv::Mat raw_frame;
+            std_msgs::msg::Header header;
+        };
+
+        uint num_frame_buffers = 16;
+        uint current_frame_buffer = 0;
+        std::vector<AVFrame*> frame_buffers;
+
+        std::thread scaler_thread;
+        
+        std::queue<ScalerRequest> scaler_queue;
+        std::condition_variable scaler_cv;
+        std::mutex scaler_mutex;
+
+        std::thread encoder_thread;
+        std::condition_variable encoder_cv;
+        std::queue<AVFrame*> encoder_queue;
+        std::mutex encoder_mutex;
+        
+        void sendFrameToEncoder(AVFrame* input_frame);
+        void scalerWorker();
+        void encoderWorker();
+        void flush();
+
+        static std::vector<AVCodecID> encoder_input_logged;
 
         std::string toString() { return "Enc " + this->topic; };
     };
