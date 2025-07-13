@@ -217,12 +217,12 @@ class gz::sensors::CameraSensorPrivate
     std::shared_ptr<rclcpp::Publisher<ffmpeg_image_transport_msgs::msg::FFMPEGPacket>> h264Pub;
     std::shared_ptr<phntm::FFmpegEncoder> encoder;
 
-    std::string encoder_hw_device = "cuda"; // "vaapi", "" = sw
+    std::string encoder_hw_device = ""; // "cuda", "vaapi", "" = sw
+    AVPixelFormat encoder_force_input_pixel_format = AVPixelFormat::AV_PIX_FMT_NONE; // overrides auto codec input pixel format selection
     int encoder_thread_count = 1;
     int encoder_gop_size = 60;
     int encoder_bit_rate = 1000000;
 };
-
 
 //////////////////////////////////////////////////
 bool CameraSensor::CreateCamera()
@@ -444,7 +444,7 @@ bool CameraSensor::Load(const sdf::Sensor &_sdf)
     return false;
   }
 
-  // direct
+  // direct uncompressed output
   if (!this->Topic().empty()) {
     rclcpp::QoS qos(1);
     // qos.best_effort();
@@ -452,12 +452,65 @@ bool CameraSensor::Load(const sdf::Sensor &_sdf)
     this->dataPtr->imagePub = this->dataPtr->directRosNode->create_publisher<sensor_msgs::msg::Image>(this->Topic(), qos);
   }
 
-  // direct
+  // direct h264 compressed output
   this->dataPtr->h264Topic = sdf_camera->HasElement("camera_h264_topic") ? sdf_camera->GetElement("camera_h264_topic")->GetValue()->GetAsString() : "";
   if (!this->dataPtr->h264Topic.empty()) {
     rclcpp::QoS qos(1);
     // qos.best_effort();
     this->dataPtr->h264Pub = this->dataPtr->directRosNode->create_publisher<ffmpeg_image_transport_msgs::msg::FFMPEGPacket>(this->dataPtr->h264Topic, qos);
+  }
+
+  if (sdf_camera->HasElement("encoder_hw_device")) {
+    this->dataPtr->encoder_hw_device = sdf_camera->GetElement("encoder_hw_device")->GetValue()->GetAsString();
+    gzdbg << "Camera [" << this->Name() << "] setting encoder_hw_device to '" << this->dataPtr->encoder_hw_device << "'" << std::endl;
+    if (this->dataPtr->encoder_hw_device == "sw")
+      this->dataPtr->encoder_hw_device = "";
+  }
+
+  if (sdf_camera->HasElement("encoder_thread_count")) {
+    this->dataPtr->encoder_thread_count = std::stoi(sdf_camera->GetElement("encoder_thread_count")->GetValue()->GetAsString());
+    gzdbg << "Camera [" << this->Name() << "] setting encoder_thread_count to '" << this->dataPtr->encoder_thread_count << "'" << std::endl;
+  }
+  
+  if (sdf_camera->HasElement("encoder_bit_rate")) {
+    this->dataPtr->encoder_bit_rate = std::stoi(sdf_camera->GetElement("encoder_bit_rate")->GetValue()->GetAsString());
+    gzdbg << "Camera [" << this->Name() << "] setting encoder_bit_rate to '" << this->dataPtr->encoder_bit_rate << "'" << std::endl;
+  }
+
+  if (sdf_camera->HasElement("encoder_input_pixel_format") && sdf_camera->GetElement("encoder_input_pixel_format")->GetValue()
+      && !sdf_camera->GetElement("encoder_input_pixel_format")->GetValue()->GetAsString().empty()) {
+    auto str_val = sdf_camera->GetElement("encoder_input_pixel_format")->GetValue()->GetAsString();
+    std::unordered_map<std::string, AVPixelFormat> map = {
+      {"yuv420p", AVPixelFormat::AV_PIX_FMT_YUV420P},
+      {"yuvj420p", AVPixelFormat::AV_PIX_FMT_YUVJ420P},
+      {"yuv422p", AVPixelFormat::AV_PIX_FMT_YUV422P},
+      {"yuvj422p", AVPixelFormat::AV_PIX_FMT_YUVJ422P},
+      {"yuv444p", AVPixelFormat::AV_PIX_FMT_YUV444P},
+      {"yuvj444p", AVPixelFormat::AV_PIX_FMT_YUVJ444P},
+      {"nv12", AVPixelFormat::AV_PIX_FMT_NV12},
+      {"nv16", AVPixelFormat::AV_PIX_FMT_NV16},
+      {"nv21", AVPixelFormat::AV_PIX_FMT_NV21},
+      {"yuv420p10le", AVPixelFormat::AV_PIX_FMT_YUV420P10LE},
+      {"yuv422p10le", AVPixelFormat::AV_PIX_FMT_YUV422P10LE},
+      {"yuv444p10le", AVPixelFormat::AV_PIX_FMT_YUV444P10LE},
+      {"nv20le", AVPixelFormat::AV_PIX_FMT_NV20LE},
+      {"gray8", AVPixelFormat::AV_PIX_FMT_GRAY8},
+      {"gray10le", AVPixelFormat::AV_PIX_FMT_GRAY10LE},
+      {"gray16", AVPixelFormat::AV_PIX_FMT_GRAY16},
+      {"rgb0", AVPixelFormat::AV_PIX_FMT_RGB0},
+      {"bgr0", AVPixelFormat::AV_PIX_FMT_BGR0},
+    };
+
+    if (map.find(str_val) != map.end()) {
+      gzdbg << "Camera [" << this->Name() << "] setting encoder_force_input_pixel_format to '" << str_val << "'" << std::endl;
+      this->dataPtr->encoder_force_input_pixel_format = map.at(str_val);
+    } else {
+      gzdbg << "Camera [" << this->Name() << "] invalid encoder_force_input_pixel_format provided: '" << str_val << "', supported values are: " << std::endl;
+      for (const auto& pair : map) {
+        gzdbg << pair.first << std::endl;
+      }
+      gzdbg << std::endl;
+    }
   }
 
   // via gz-ros-bridge
@@ -466,16 +519,7 @@ bool CameraSensor::Load(const sdf::Sensor &_sdf)
     this->dataPtr->infoTopic = _sdf.CameraSensor()->CameraInfoTopic();
   }
 
-  // this->dataPtr->pub =
-  //     this->dataPtr->node.Advertise<gz::msgs::Image>(
-  //         this->Topic());
-  // if (!this->dataPtr->pub)
-  // {
-  //   gzerr << "Unable to create publisher on topic["
-  //     << this->Topic() << "].\n";
-  //   return false;
-  // }
-
+ 
   gzdbg << "Camera images for [" << this->Name() << "] advertised on ROS topic ["
          << this->Topic() << "]" << std::endl;
 
@@ -632,23 +676,23 @@ bool CameraSensor::Update(const std::chrono::steady_clock::duration &_now)
     {
       case rendering::PF_R8G8B8:
         camera_image_format = "rgb8";
-        opencv_format = AV_PIX_FMT_RGB24;
-        codec_input_format = AV_PIX_FMT_RGB0;
+        opencv_format = AVPixelFormat::AV_PIX_FMT_RGB24;
+        codec_input_format = AVPixelFormat::AV_PIX_FMT_NV12;
         break;
       case rendering::PF_B8G8R8:
         camera_image_format = "bgr8";
-        opencv_format = AV_PIX_FMT_BGR24;
-        codec_input_format = AV_PIX_FMT_BGR0;
+        opencv_format = AVPixelFormat::AV_PIX_FMT_BGR24;
+        codec_input_format = AVPixelFormat::AV_PIX_FMT_NV12;
         break;
       case rendering::PF_L8:
         camera_image_format = "mono8";
-        opencv_format = AV_PIX_FMT_GRAY8;
-        codec_input_format = AV_PIX_FMT_GRAY8;
+        opencv_format = AVPixelFormat::AV_PIX_FMT_GRAY8;
+        codec_input_format = AVPixelFormat::AV_PIX_FMT_GRAY8;
         break;
       case rendering::PF_L16:
         camera_image_format = "mono16";
-        opencv_format = AV_PIX_FMT_GRAY16;
-        codec_input_format = AV_PIX_FMT_GRAY16;
+        opencv_format = AVPixelFormat::AV_PIX_FMT_GRAY16;
+        codec_input_format = AVPixelFormat::AV_PIX_FMT_GRAY16;
         break;
       case rendering::PF_BAYER_RGGB8:
         camera_image_format = "rggb8";
@@ -668,6 +712,9 @@ bool CameraSensor::Update(const std::chrono::steady_clock::duration &_now)
     if (camera_image_format.empty()) {
       gzerr << "Unsupported pixel format [" << this->dataPtr->camera->ImageFormat() << "]" << " \n";
       return false;
+    }
+    if (this->dataPtr->encoder_force_input_pixel_format != AVPixelFormat::AV_PIX_FMT_NONE) {
+      codec_input_format = this->dataPtr->encoder_force_input_pixel_format;
     }
 
     if (hasH264Connections) {
