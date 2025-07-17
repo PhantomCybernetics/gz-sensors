@@ -217,11 +217,13 @@ class gz::sensors::CameraSensorPrivate
     std::shared_ptr<rclcpp::Publisher<ffmpeg_image_transport_msgs::msg::FFMPEGPacket>> h264Pub;
     std::shared_ptr<phntm::FFmpegEncoder> encoder;
 
-    std::string encoder_hw_device = ""; // "cuda", "vaapi", "" = sw
-    AVPixelFormat encoder_force_input_pixel_format = AVPixelFormat::AV_PIX_FMT_NONE; // overrides auto codec input pixel format selection
-    int encoder_thread_count = 1;
-    int encoder_gop_size = 60;
-    int encoder_bit_rate = 1000000;
+    std::string encoderHwDevice = ""; // "cuda", "vaapi", "" = sw
+    std::string camerasResolution = "";
+    AVPixelFormat encoderForceInputPixelFormat = AVPixelFormat::AV_PIX_FMT_NONE; // overrides auto codec input pixel format selection
+    int encoderThreadCount = 1;
+    int encoderGOPSize = 60;
+    int encoderBitRate = 1000000;
+    bool encoderError = false;
 };
 
 //////////////////////////////////////////////////
@@ -461,20 +463,20 @@ bool CameraSensor::Load(const sdf::Sensor &_sdf)
   }
 
   if (sdf_camera->HasElement("encoder_hw_device")) {
-    this->dataPtr->encoder_hw_device = sdf_camera->GetElement("encoder_hw_device")->GetValue()->GetAsString();
-    gzdbg << "Camera [" << this->Name() << "] setting encoder_hw_device to '" << this->dataPtr->encoder_hw_device << "'" << std::endl;
-    if (this->dataPtr->encoder_hw_device == "sw")
-      this->dataPtr->encoder_hw_device = "";
+    this->dataPtr->encoderHwDevice = sdf_camera->GetElement("encoder_hw_device")->GetValue()->GetAsString();
+    gzdbg << "Camera [" << this->Name() << "] setting encoder_hw_device to '" << this->dataPtr->encoderHwDevice << "'" << std::endl;
+    if (this->dataPtr->encoderHwDevice == "sw")
+      this->dataPtr->encoderHwDevice = "";
   }
 
   if (sdf_camera->HasElement("encoder_thread_count")) {
-    this->dataPtr->encoder_thread_count = std::stoi(sdf_camera->GetElement("encoder_thread_count")->GetValue()->GetAsString());
-    gzdbg << "Camera [" << this->Name() << "] setting encoder_thread_count to '" << this->dataPtr->encoder_thread_count << "'" << std::endl;
+    this->dataPtr->encoderThreadCount = std::stoi(sdf_camera->GetElement("encoder_thread_count")->GetValue()->GetAsString());
+    gzdbg << "Camera [" << this->Name() << "] setting encoder_thread_count to '" << this->dataPtr->encoderThreadCount << "'" << std::endl;
   }
   
   if (sdf_camera->HasElement("encoder_bit_rate")) {
-    this->dataPtr->encoder_bit_rate = std::stoi(sdf_camera->GetElement("encoder_bit_rate")->GetValue()->GetAsString());
-    gzdbg << "Camera [" << this->Name() << "] setting encoder_bit_rate to '" << this->dataPtr->encoder_bit_rate << "'" << std::endl;
+    this->dataPtr->encoderBitRate = std::stoi(sdf_camera->GetElement("encoder_bit_rate")->GetValue()->GetAsString());
+    gzdbg << "Camera [" << this->Name() << "] setting encoder_bit_rate to '" << this->dataPtr->encoderBitRate << "'" << std::endl;
   }
 
   if (sdf_camera->HasElement("encoder_input_pixel_format") && sdf_camera->GetElement("encoder_input_pixel_format")->GetValue()
@@ -503,7 +505,7 @@ bool CameraSensor::Load(const sdf::Sensor &_sdf)
 
     if (map.find(str_val) != map.end()) {
       gzdbg << "Camera [" << this->Name() << "] setting encoder_force_input_pixel_format to '" << str_val << "'" << std::endl;
-      this->dataPtr->encoder_force_input_pixel_format = map.at(str_val);
+      this->dataPtr->encoderForceInputPixelFormat = map.at(str_val);
     } else {
       gzdbg << "Camera [" << this->Name() << "] invalid encoder_force_input_pixel_format provided: '" << str_val << "', supported values are: " << std::endl;
       for (const auto& pair : map) {
@@ -713,37 +715,39 @@ bool CameraSensor::Update(const std::chrono::steady_clock::duration &_now)
       gzerr << "Unsupported pixel format [" << this->dataPtr->camera->ImageFormat() << "]" << " \n";
       return false;
     }
-    if (this->dataPtr->encoder_force_input_pixel_format != AVPixelFormat::AV_PIX_FMT_NONE) {
-      codec_input_format = this->dataPtr->encoder_force_input_pixel_format;
+    if (this->dataPtr->encoderForceInputPixelFormat != AVPixelFormat::AV_PIX_FMT_NONE) {
+      codec_input_format = this->dataPtr->encoderForceInputPixelFormat;
     }
 
     if (hasH264Connections) {
 
        // make encoder
-        if (this->dataPtr->encoder.get() == nullptr) {
+        if (this->dataPtr->encoder.get() == nullptr && !this->dataPtr->encoderError) {
 
           std::cout << "Camera [" << this->Name() << "] output image format = " << camera_image_format << std::endl;
 
-          RCLCPP_INFO(this->dataPtr->directRosNode->get_logger(), "Making encoder %dx%d for %s with hw_device=%s",
-                      width, height, this->H264Topic().c_str(), this->dataPtr->encoder_hw_device.c_str());
+          RCLCPP_INFO(this->dataPtr->directRosNode->get_logger(), "** Making encoder %dx%d for %s with hw_device=%s",
+                      width, height, this->H264Topic().c_str(), this->dataPtr->encoderHwDevice.c_str());
           try {
               this->dataPtr->encoder = std::make_shared<phntm::FFmpegEncoder>(width, height,
                                               camera_image_format, opencv_format, codec_input_format,
                                               this->OpticalFrameId(), this->H264Topic(), this->dataPtr->directRosNode,
-                                              this->dataPtr->encoder_hw_device,
-                                              this->dataPtr->encoder_thread_count,
-                                              this->dataPtr->encoder_gop_size,
-                                              this->dataPtr->encoder_bit_rate,
+                                              this->dataPtr->encoderHwDevice,
+                                              this->dataPtr->encoderThreadCount,
+                                              this->dataPtr->encoderGOPSize,
+                                              this->dataPtr->encoderBitRate,
                                               std::bind(&CameraSensor::onEncodedFrame, this, std::placeholders::_1));
           } catch (const std::runtime_error & ex) {
               this->dataPtr->encoder.reset();
               // this->encoder_error = true;
               std::cout << "Error making encoder" << std::endl;
               RCLCPP_ERROR(this->dataPtr->directRosNode->get_logger(), "%s", ex.what());
-              return false;
+              this->dataPtr->encoderError = true;
           }
         }
-        if (this->dataPtr->encoder != nullptr) {
+        if (this->dataPtr->encoder.get() == nullptr) {
+          this->dataPtr->encoderError = true;
+        } else {
           cv::Mat frame;
           switch (this->dataPtr->camera->ImageFormat())
           {
