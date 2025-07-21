@@ -27,6 +27,9 @@ namespace gz
             };
 
             static std::map<std::string, NodeRef> directROSNodes;
+            static bool spinning;
+            static void SpinNodes();
+            static std::thread spinner_thread;
     };
 
   }

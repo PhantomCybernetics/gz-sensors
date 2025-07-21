@@ -23,10 +23,10 @@ namespace phntm {
     FFmpegEncoder::FFmpegEncoder(int src_frame_width, int src_frame_height, std::string src_frame_encoding, AVPixelFormat opencv_format, AVPixelFormat codec_input_format, std::string output_frame_id, std::string output_topic, std::shared_ptr<rclcpp::Node> ros_node, std::string& hw_device, int thread_count, int gop_size, int bit_rate, PacketCallback callback)
         : width(src_frame_width), height(src_frame_height), src_encoding(src_frame_encoding), packet_callback(callback), frame_id(output_frame_id), topic(output_topic), node(ros_node) {
 
-        // Initialize FFmpeg
+        // initialize FFmpeg
         avformat_network_init();
         
-        // Find hardware device type
+        // find hardware device type
         if (hw_device == "cuda") {
             hw_device_type = av_hwdevice_find_type_by_name("cuda");
         } else if (hw_device == "vaapi") {
@@ -34,20 +34,21 @@ namespace phntm {
         } else {
             hw_device_type = AV_HWDEVICE_TYPE_NONE;
         }
-        
-        // Create hardware device context if needed
-        if (hw_device_type != AV_HWDEVICE_TYPE_NONE) {
-            if (av_hwdevice_ctx_create(&this->hw_device_ctx, hw_device_type, nullptr, nullptr, 0) < 0) {
-                throw std::runtime_error("["+this->toString()+"] Failed to create hardware device context for " + hw_device);
-            }
-        }
 
-        // Find the H.264 encoder
+        // find the H.264 encoder
         const AVCodec* codec = nullptr;
         if (hw_device_type != AV_HWDEVICE_TYPE_NONE) {
-            codec = avcodec_find_encoder_by_name("h264_nvenc"); // NVIDIA
-            if (!codec) codec = avcodec_find_encoder_by_name("h264_vaapi"); // Intel
-            if (!codec) codec = avcodec_find_encoder_by_name("h264_amf"); // AMD
+            if (hw_device == "cuda") {
+                RCLCPP_INFO(this->node->get_logger(), "[AVCodec] Setting codec to cuda");
+                codec = avcodec_find_encoder_by_name("h264_nvenc"); // NVIDIA
+            } else if (hw_device == "vaapi") {
+                RCLCPP_INFO(this->node->get_logger(), "[AVCodec] Setting codec to h264_amf");
+                codec = avcodec_find_encoder_by_name("h264_amf"); // AMD
+                if (!codec) {
+                    RCLCPP_INFO(this->node->get_logger(), "[AVCodec] Setting codec to h264_vaapi");
+                    codec = avcodec_find_encoder_by_name("h264_vaapi"); // Intel
+                }
+            }
         }
 
         if (!codec) {
@@ -79,61 +80,126 @@ namespace phntm {
         RCLCPP_INFO(this->node->get_logger(), "[AVCodec] OpenCV conversion format for sw-scaling: %s", av_get_pix_fmt_name(opencv_format));
         RCLCPP_INFO(this->node->get_logger(), "[AVCodec %s] Selected input pixel format: %s", codec->name, av_get_pix_fmt_name(codec_input_format));
 
-        // Set up codec context
+        // set up codec context
         this->codec_ctx = avcodec_alloc_context3(codec);
         if (!this->codec_ctx) {
             throw std::runtime_error("["+this->toString()+"] Could not allocate codec context");
         }
-        
         this->codec_ctx->width = width;
         this->codec_ctx->height = height;
         this->codec_ctx->time_base = AVRational{1, fps}; // t
         this->codec_ctx->framerate = AVRational{fps, 1};
-        this->codec_ctx->pix_fmt = codec_input_format; // this is input to the codec (output of sws_scale)
+        this->codec_ctx->pix_fmt = hw_device_type == AV_HWDEVICE_TYPE_VAAPI ? AV_PIX_FMT_VAAPI : codec_input_format; // this is input to the codec (output of sws_scale)
         this->codec_ctx->gop_size = gop_size; // 60
         this->codec_ctx->max_b_frames = 0;
         this->codec_ctx->thread_count = thread_count;
         this->codec_ctx->bit_rate = bit_rate; // 512 * 1024 * 8; // 0.5 MB/s
-        
         this->codec_ctx->flags &= ~AV_CODEC_FLAG_GLOBAL_HEADER;
         this->codec_ctx->flags |= AV_CODEC_FLAG_LOW_DELAY;     // For real-time
-        // this->codec_ctx->flags2 |= AV_CODEC_FLAG2_FAST;        // Faster encoding
-
-        if (hw_device_ctx) {
-            this->codec_ctx->hw_device_ctx = hw_device_ctx;
-        }
-        
-        // Set encoder options
+        // this->codec_ctx->flags2 |= AV_CODEC_FLAG2_FAST;        // Faster encoding        // set encoder options
         av_opt_set(this->codec_ctx->priv_data, "preset", "fast", 0);
         if (hw_device_type == AV_HWDEVICE_TYPE_NONE)
             av_opt_set(this->codec_ctx->priv_data, "tune", "zerolatency", 0);
         av_opt_set(this->codec_ctx->priv_data, "profile", "high", 0);
+
+        // initialize sw conversion context
+        this->sws_ctx = sws_getContext(width, height,
+                                       opencv_format, // OpenCV format
+                                       width, height,
+                                       codec_input_format, // codec input
+                                       SWS_POINT,
+                                       nullptr, nullptr,
+                                       nullptr);
+
+        // allocate sw frames pool
+        for (uint i = 0; i < this->num_frame_buffers; i++) {
+            auto sw_frame = av_frame_alloc();
+            if (!sw_frame) {
+                throw std::runtime_error("["+this->toString()+"] Could not allocate sw frame #" + std::to_string(i) + " for "+topic);
+            }
+            sw_frame->format = codec_input_format;
+            sw_frame->width = width;
+            sw_frame->height = height;
+            if (av_frame_get_buffer(sw_frame, 0) < 0) {
+                throw std::runtime_error("["+this->toString()+"] Could not allocate frame #" + std::to_string(i) + " data for " + topic);
+            }
+            this->sw_frame_buffers.push_back(sw_frame);
+        }
+
+        // create hardware device context
+        if (hw_device_type != AV_HWDEVICE_TYPE_NONE) {
+            if (hw_device_type == AV_HWDEVICE_TYPE_VAAPI) {
+                RCLCPP_INFO(this->node->get_logger(), "[AVCodec] Making hw device ctx for VAAPI");
+                if (av_hwdevice_ctx_create(&this->hw_device_ctx, hw_device_type, "/dev/dri/renderD128", nullptr, 0) < 0) {
+                   throw std::runtime_error("["+this->toString()+"] Failed to create hardware device context for " + hw_device);
+                }
+                this->codec_ctx->hw_device_ctx = av_buffer_ref(this->hw_device_ctx);
+            } else {
+                RCLCPP_INFO(this->node->get_logger(), "[AVCodec] Making hw device ctx");
+                if (av_hwdevice_ctx_create(&this->hw_device_ctx, hw_device_type, nullptr, nullptr, 0) < 0) {
+                   throw std::runtime_error("["+this->toString()+"] Failed to create hardware device context for " + hw_device);
+                }
+                this->codec_ctx->hw_device_ctx = av_buffer_ref(this->hw_device_ctx);
+            }
+        }
+
+        if (hw_device_type == AV_HWDEVICE_TYPE_VAAPI) {
+            RCLCPP_INFO(this->node->get_logger(), "[AVCodec %s] Making hw frames ctx", codec->name);
+            
+            int err = 0;
+            AVBufferRef *hw_frames_ref;
+            AVHWFramesContext *hw_frames_ctx = NULL;
+
+            if (!(hw_frames_ref = av_hwframe_ctx_alloc(hw_device_ctx))) {
+                throw std::runtime_error("Failed to create VAAPI frame context.");
+            }
+            hw_frames_ctx = (AVHWFramesContext *)(hw_frames_ref->data);
+            hw_frames_ctx->format = AV_PIX_FMT_VAAPI;       // Hardware pixel format
+            hw_frames_ctx->sw_format = codec_input_format;     // SW pixel format to upload from
+            hw_frames_ctx->width = width;
+            hw_frames_ctx->height = height;
+            hw_frames_ctx->initial_pool_size = this->num_frame_buffers;
+
+            if ((err = av_hwframe_ctx_init(hw_frames_ref)) < 0) {
+                av_buffer_unref(&hw_frames_ref);
+                throw std::runtime_error("Failed to initialize VAAPI frame context. Error code: " + std::to_string(err));
+            }
+
+            this->codec_ctx->hw_frames_ctx = av_buffer_ref(hw_frames_ref);
+            if (!this->codec_ctx->hw_frames_ctx) {
+                av_buffer_unref(&hw_frames_ref);
+                throw std::runtime_error("Failed to allocate codec_ctx->hw_frames_ctx");
+            }
+
+            av_buffer_unref(&hw_frames_ref);
+
+            
+            // allocate hw frames pool
+            for (uint i = 0; i < this->num_frame_buffers; i++) {
+
+                AVFrame * hw_frame;
+                
+                if (!(hw_frame = av_frame_alloc())) {
+                    err = AVERROR(ENOMEM);
+                    throw std::runtime_error("Error allocating hw frame " + std::to_string(i));
+                }
+                if ((err = av_hwframe_get_buffer(this->codec_ctx->hw_frames_ctx, hw_frame, 0)) < 0) {
+                    throw std::runtime_error("Error getting buffer for hw frame " + std::to_string(i));
+                }
+                if (!hw_frame->hw_frames_ctx) {
+                    throw std::runtime_error("Error checking allocated hw frame " + std::to_string(i));
+                }
+
+                this->hw_frame_buffers.push_back(hw_frame);
+            }
+        }
         
-        // Open codec
+        // open codec
         if (avcodec_open2(this->codec_ctx, codec, nullptr) < 0) {
             throw std::runtime_error("["+this->toString()+"] Could not open codec for " + topic);
         }
         
-        // Allocate frame
-        for (uint i = 0; i < this->num_frame_buffers; i++) {
-            auto frame = av_frame_alloc();
-            if (!frame) {
-                throw std::runtime_error("["+this->toString()+"] Could not allocate frame #" + std::to_string(i) + " for "+topic);
-            }
-            frame->format = this->codec_ctx->pix_fmt;
-            frame->width = width;
-            frame->height = height;
-            if (av_frame_get_buffer(frame, 0) < 0) {
-                throw std::runtime_error("["+this->toString()+"] Could not allocate frame #" + std::to_string(i) + " data for " + topic);
-            }
-            this->frame_buffers.push_back(frame);
-        }
-    
-        // Initialize color conversion context
-        sws_ctx = sws_getContext(width, height, opencv_format, // OpenCV format
-                                width, height, this->codec_ctx->pix_fmt, // codec input
-                                SWS_POINT, nullptr, nullptr, nullptr);
-
+        // lanuch workers
         this->running = true;
         this->scaler_thread = std::thread(&FFmpegEncoder::scalerWorker, this);
         this->scaler_thread.detach();
@@ -172,6 +238,7 @@ namespace phntm {
     void FFmpegEncoder::scalerWorker() {
          std::cout << "["+this->toString()+"] FFmpegEncoder scaler runnig..." << std::endl;
 
+        int err;
         while (this->running) {
 
             std::unique_lock<std::mutex> scaler_lock(this->scaler_mutex);
@@ -183,7 +250,12 @@ namespace phntm {
 
             scaler_lock.unlock();
 
-            AVFrame* frame = this->frame_buffers[this->current_frame_buffer];
+            AVFrame* sw_frame = this->sw_frame_buffers[this->current_frame_buffer];
+            AVFrame* hw_frame;
+            if (hw_device_type == AV_HWDEVICE_TYPE_VAAPI) {
+                hw_frame = this->hw_frame_buffers[this->current_frame_buffer];
+            }
+            
             this->current_frame_buffer++;
             if (this->current_frame_buffer == this->num_frame_buffers) {
                 this->current_frame_buffer = 0;
@@ -193,12 +265,19 @@ namespace phntm {
             
             // sw scaling & copy here - expensive
             sws_scale(this->sws_ctx, src_data, src_linesize, 0, this->height, 
-                    frame->data, frame->linesize);
-
-            frame->pts = convertToRtpTimestamp(req.header.stamp.sec, req.header.stamp.nanosec);
+                    sw_frame->data, sw_frame->linesize);
 
             // Send for encoding
-            this->sendFrameToEncoder(frame);
+            if (hw_device_type == AV_HWDEVICE_TYPE_VAAPI) {
+                if ((err = av_hwframe_transfer_data(hw_frame, sw_frame, 0)) < 0) {
+                    throw std::runtime_error("Error while transferring frame data to surface. Error code: " + std::to_string(err));
+                }
+                hw_frame->pts = convertToRtpTimestamp(req.header.stamp.sec, req.header.stamp.nanosec);
+                this->sendFrameToEncoder(hw_frame);
+            } else {
+                sw_frame->pts = convertToRtpTimestamp(req.header.stamp.sec, req.header.stamp.nanosec);
+                this->sendFrameToEncoder(sw_frame);
+            }
         }
 
         std::cout << "["+this->toString()+"] FFmpegEncoder scaler stopped..." << std::endl;
@@ -302,27 +381,28 @@ namespace phntm {
         std::cout << "["+this->toString()+"] Claning up..." << std::endl;
         // Cleanup
         for (uint i = 0; i < this->num_frame_buffers; i++) {
-            if (this->frame_buffers[i])
-                av_frame_free(&this->frame_buffers[i]);
+            if (this->sw_frame_buffers[i])
+                av_frame_free(&this->sw_frame_buffers[i]);
+            if (this->hw_frame_buffers[i])
+                av_frame_free(&this->hw_frame_buffers[i]);
         }
-        this->frame_buffers.clear();
+        this->sw_frame_buffers.clear();
+        this->hw_frame_buffers.clear();
         
         if (this->codec_ctx) {
             this->codec_ctx->hw_device_ctx = nullptr; //remove this before deallocating
             avcodec_free_context(&this->codec_ctx);
         }
-        if (hw_device_ctx)
-            av_buffer_unref(&hw_device_ctx);
-        if (fmt_ctx)
-            avformat_free_context(fmt_ctx);
-        if (sws_ctx)
-            sws_freeContext(sws_ctx);
+        if (this->hw_device_ctx)
+            av_buffer_unref(&this->hw_device_ctx);
+        if (this->fmt_ctx)
+            avformat_free_context(this->fmt_ctx);
+        if (this->sws_ctx)
+            sws_freeContext(this->sws_ctx);
 
         if (this->node.get() != nullptr)
             this->node.reset();
 
         std::cout << "["+this->toString()+"] Cleanup done." << std::endl;
     }
-
-
 }

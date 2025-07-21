@@ -67,8 +67,12 @@ namespace phntm {
         SwsContext* sws_ctx = nullptr;
 
         AVBufferRef* hw_device_ctx = nullptr;
-        enum AVHWDeviceType hw_device_type = AV_HWDEVICE_TYPE_NONE;
 
+        // AVBufferRef* hw_frames_ref = nullptr;
+        // AVHWFramesContext* hw_frames_ctx = nullptr;
+        
+        enum AVHWDeviceType hw_device_type = AV_HWDEVICE_TYPE_NONE;
+        
         std::string frame_id, topic;
         std::shared_ptr<rclcpp::Node> node;
         bool running = false;
@@ -80,7 +84,8 @@ namespace phntm {
 
         uint num_frame_buffers = 16;
         uint current_frame_buffer = 0;
-        std::vector<AVFrame*> frame_buffers;
+        std::vector<AVFrame*> sw_frame_buffers;
+        std::vector<AVFrame*> hw_frame_buffers;
 
         std::thread scaler_thread;
         

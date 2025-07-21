@@ -1,10 +1,14 @@
 #include "gz/sensors/DirectRosNode.hh"
+#include <chrono>
+#include <rclcpp/executors.hpp>
 
 using namespace gz;
 using namespace sensors;
 
 std::map<std::string, DirectRosNode::NodeRef> DirectRosNode::directROSNodes;
 std::mutex DirectRosNode::mutex;
+bool DirectRosNode::spinning = false;
+std::thread DirectRosNode::spinner_thread;
 // bool DirectRosNode::rclcpp_intiated = false;
 
 
@@ -34,7 +38,25 @@ std::shared_ptr<rclcpp::Node>  gz::sensors::DirectRosNode::GetDirectROSNode(std:
     node_ref->owners.push_back(owner_ptr);
   }
 
+  if (!DirectRosNode::spinning) {
+    DirectRosNode::spinning = true;
+    DirectRosNode::spinner_thread = std::thread(&DirectRosNode::SpinNodes);
+    DirectRosNode::spinner_thread.detach();
+  }
+
   return node_ref->node;
+}
+
+void DirectRosNode::SpinNodes() {
+    std::cout << "Spinning direct ROS Nodes every second... " << std::endl;
+    while (DirectRosNode::spinning) {
+      for (const auto& pair : DirectRosNode::directROSNodes) {
+        //std::cout << "spinning " << pair.first << std::endl;
+        rclcpp::spin_some(pair.second.node);
+      }
+      std::this_thread::sleep_for(std::chrono::seconds(1)); // spin all once a sex
+    }
+    std::cout << "Stopped spinning direct ROS nodes." << std::endl;
 }
 
 
@@ -57,9 +79,8 @@ void gz::sensors::DirectRosNode::ReleaseDirectROSNode(std::string node_name, voi
     DirectRosNode::directROSNodes.erase(node_name);
   }
 
-  // if (DirectRosNode::directROSNodes.empty()) {
-  //   rclcpp::shutdown();
-  //   DirectRosNode::rclcpp_intiated = false;
-  // }
+  if (DirectRosNode::directROSNodes.empty()) {
+    DirectRosNode::spinning = false; // kill spinner
+  }
   
 }

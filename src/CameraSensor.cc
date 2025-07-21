@@ -501,6 +501,7 @@ bool CameraSensor::Load(const sdf::Sensor &_sdf)
       {"gray16", AVPixelFormat::AV_PIX_FMT_GRAY16},
       {"rgb0", AVPixelFormat::AV_PIX_FMT_RGB0},
       {"bgr0", AVPixelFormat::AV_PIX_FMT_BGR0},
+      {"vaapi", AVPixelFormat::AV_PIX_FMT_VAAPI},
     };
 
     if (map.find(str_val) != map.end()) {
@@ -632,7 +633,6 @@ bool CameraSensor::Update(const std::chrono::steady_clock::duration &_now)
             << "' data generation. " << std::endl;
       this->dataPtr->generatingData = false;
     }
-
     return true;
   }
   else
@@ -726,7 +726,7 @@ bool CameraSensor::Update(const std::chrono::steady_clock::duration &_now)
 
           std::cout << "Camera [" << this->Name() << "] output image format = " << camera_image_format << std::endl;
 
-          RCLCPP_INFO(this->dataPtr->directRosNode->get_logger(), "** Making encoder %dx%d for %s with hw_device=%s",
+          RCLCPP_INFO(this->dataPtr->directRosNode->get_logger(), "Making encoder %dx%d for %s with hw_device=%s",
                       width, height, this->H264Topic().c_str(), this->dataPtr->encoderHwDevice.c_str());
           try {
               this->dataPtr->encoder = std::make_shared<phntm::FFmpegEncoder>(width, height,
