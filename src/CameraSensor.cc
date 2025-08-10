@@ -220,8 +220,8 @@ class gz::sensors::CameraSensorPrivate
     std::string encoderHwDevice = ""; // "cuda", "vaapi", "" = sw
     std::string camerasResolution = "";
     AVPixelFormat encoderForceInputPixelFormat = AVPixelFormat::AV_PIX_FMT_NONE; // overrides auto codec input pixel format selection
-    int encoderThreadCount = 1;
-    int encoderGOPSize = 60;
+    int encoderThreadCount = 2;
+    int encoderGOPSize = 15;
     int encoderBitRate = 1000000;
     bool encoderError = false;
 };
@@ -657,9 +657,11 @@ bool CameraSensor::Update(const std::chrono::steady_clock::duration &_now)
     }
 
     this->Render();
+    uint gl_id;
     {
-      GZ_PROFILE("CameraSensor::Update Copy image");
-      this->dataPtr->camera->Copy(*image_buffer); // copy here
+      //GZ_PROFILE("CameraSensor::Update Copy image");
+      //this->dataPtr->camera->Copy(*image_buffer); // copy here
+      gl_id = this->RenderingCamera()->RenderTextureGLId(); // zero copy
     }
     
     unsigned int width = this->dataPtr->camera->ImageWidth();
@@ -719,10 +721,10 @@ bool CameraSensor::Update(const std::chrono::steady_clock::duration &_now)
       codec_input_format = this->dataPtr->encoderForceInputPixelFormat;
     }
 
-    if (hasH264Connections) {
+    if (hasH264Connections && !this->dataPtr->encoderError) {
 
        // make encoder
-        if (this->dataPtr->encoder.get() == nullptr && !this->dataPtr->encoderError) {
+        if (this->dataPtr->encoder.get() == nullptr) {
 
           std::cout << "Camera [" << this->Name() << "] output image format = " << camera_image_format << std::endl;
 
@@ -740,8 +742,7 @@ bool CameraSensor::Update(const std::chrono::steady_clock::duration &_now)
           } catch (const std::runtime_error & ex) {
               this->dataPtr->encoder.reset();
               // this->encoder_error = true;
-              std::cout << "Error making encoder" << std::endl;
-              RCLCPP_ERROR(this->dataPtr->directRosNode->get_logger(), "%s", ex.what());
+              RCLCPP_ERROR(this->dataPtr->directRosNode->get_logger(), "[%s] Error making encoder %s", this->Name().c_str(), ex.what());
               this->dataPtr->encoderError = true;
           }
         }
@@ -773,7 +774,12 @@ bool CameraSensor::Update(const std::chrono::steady_clock::duration &_now)
           header = std_msgs::msg::Header();
           header.frame_id = this->dataPtr->opticalFrameId;
           setCurrentStamp(&header.stamp, _now);
-          this->dataPtr->encoder->encodeFrame(frame, header);
+          //this->dataPtr->encoder->encodeFrame(frame, header);
+          if (!this->dataPtr->encoder->encodeFrameZeroCopy(gl_id, header)) {
+            this->dataPtr->encoderError = true;
+            RCLCPP_ERROR(this->dataPtr->directRosNode->get_logger(), "[%s] Error encoding frame", this->Name().c_str());
+          }
+            
         }
     }
 

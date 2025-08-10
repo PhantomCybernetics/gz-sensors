@@ -70,6 +70,14 @@ find_package(std_srvs REQUIRED)
 #find_package(${rendering_target} REQUIRED)
 find_package(OpenCV REQUIRED)
 
+pkg_check_modules(DRM REQUIRED libdrm)
+pkg_check_modules(GBM REQUIRED gbm)
+pkg_check_modules(EGL REQUIRED egl)
+pkg_check_modules(GLES REQUIRED glesv2)
+pkg_check_modules(VA REQUIRED libva libva-drm)
+pkg_check_modules(AVCODEC REQUIRED libavcodec)
+pkg_check_modules(AVUTIL REQUIRED libavutil)
+
 set(camera_sources CameraSensor.cc DirectRosNode.cc FFmpegEncoder.cc)
 gz_add_component(camera
   SOURCES ${camera_sources}
@@ -111,6 +119,14 @@ target_include_directories(${camera_target} PUBLIC
     ${OpenCV_INCLUDE_DIRS}
     ${FFMPEG_INCLUDE_DIRS}
     /usr/include/opencv4
+    ${DRM_INCLUDE_DIRS}
+    ${GBM_INCLUDE_DIRS}
+    ${EGL_INCLUDE_DIRS}
+    ${GLES_INCLUDE_DIRS}
+    ${VA_INCLUDE_DIRS}
+    ${AVCODEC_INCLUDE_DIRS}
+    ${AVUTIL_INCLUDE_DIRS}
+    /usr/include/x86_64-linux-gnu
 )
 # custom compile definitions since the one provided automatically is versioned and will
 # make the code need to change with every major version
@@ -143,6 +159,16 @@ target_link_libraries(${camera_target}
     ${OpenCV_LIBS}
     ${FFMPEG_LINK_FLAGS}
     ${AVFORMAT}
+    ${DRM_LIBRARIES}
+    ${GBM_LIBRARIES}
+    ${EGL_LIBRARIES}
+    ${GLES_LIBRARIES}
+    ${VA_LIBRARIES}
+    ${AVCODEC_LIBRARIES}
+    ${AVUTIL_LIBRARIES}
+    dl
+    drm
+    va-drm
 )
 
 set(depth_camera_sources DepthCameraSensor.cc)
@@ -206,7 +232,7 @@ target_link_libraries(${gpu_lidar_target}
 
 set(logical_camera_sources LogicalCameraSensor.cc)
 gz_add_component(logical_camera SOURCES ${logical_camera_sources} GET_TARGET_NAME logical_camera_target)
-target_compile_definitions(${logical_camera_target} PUBLIC LogicalCameraSensor_EXPORTS)
+target_compile_definitions(${logical_camera_target} PUBLIC LogicalCameraSensor_EXPORTS EGL_NO_X11 GL_NO_X11)
 target_link_libraries(${logical_camera_target}
   PRIVATE
     gz-msgs${GZ_MSGS_VER}::gz-msgs${GZ_MSGS_VER}
