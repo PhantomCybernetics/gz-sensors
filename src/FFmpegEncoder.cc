@@ -107,11 +107,10 @@ namespace phntm {
                 RCLCPP_INFO(this->node->get_logger(), "[AVCodec] Setting codec to cuda");
                 codec = avcodec_find_encoder_by_name("h264_nvenc"); // NVIDIA
             } else if (hw_device == "vaapi") {
-                RCLCPP_INFO(this->node->get_logger(), "[AVCodec] Setting codec to h264_amf");
-                codec = avcodec_find_encoder_by_name("h264_amf"); // AMD
+                RCLCPP_INFO(this->node->get_logger(), "[AVCodec] Setting codec to h264_vaapi");
+                codec = avcodec_find_encoder_by_name("h264_vaapi"); // Using VAAPI encoder
                 if (!codec) {
-                    RCLCPP_INFO(this->node->get_logger(), "[AVCodec] Setting codec to h264_vaapi");
-                    codec = avcodec_find_encoder_by_name("h264_vaapi"); // Intel
+                    throw std::runtime_error("["+this->toString()+"] h264_vaapi encoder not found");
                 }
             }
         }
@@ -344,8 +343,19 @@ namespace phntm {
         }
         this->log("VAAPI initializated with v" + std::to_string(major_version) + "." +  std::to_string(minor_version));
 
-        // Create a config for your codec/profile
-        if (vaCreateConfig(this->va_display, VAProfileH264Main, VAEntrypointEncSlice, nullptr, 0, &this->va_config) != VA_STATUS_SUCCESS) {
+        // Create VA encoder configuration
+        VAConfigAttrib attribs[1];
+        attribs[0].type = VAConfigAttribRateControl;
+        vaGetConfigAttributes(this->va_display, VAProfileH264Main, VAEntrypointEncSlice, attribs, 1);
+        
+        if (!(attribs[0].value & VA_RC_CBR)) {
+            this->err("CBR rate control not supported");
+            return false;
+        }
+        
+        attribs[0].value = VA_RC_CBR;  // Use CBR mode
+        
+        if (vaCreateConfig(this->va_display, VAProfileH264Main, VAEntrypointEncSlice, attribs, 1, &this->va_config) != VA_STATUS_SUCCESS) {
             this->err("VAAPI config failed");
             return false;
         }
@@ -369,7 +379,7 @@ namespace phntm {
 
                 vec3 rgb = texelFetch(inputTex, pos, 0).rgb; // in [0,1]
 
-                rgb = vec3(0.5, 0.5, 0.5);
+                rgb = vec3(0.5);
 
                 // BT.709 / linear RGB -> YUV (Y in [0,1], U/V centered at 0.5)
                 float Y = 0.2126 * rgb.r + 0.7152 * rgb.g + 0.0722 * rgb.b;
@@ -444,10 +454,10 @@ namespace phntm {
             EGLint y_attrs[] = {
                 EGL_GL_TEXTURE_LEVEL_KHR, 0,
                 EGL_IMAGE_PRESERVED_KHR, EGL_TRUE,
-                // EGL_LINUX_DRM_FOURCC_EXT, DRM_FORMAT_R8,
+                EGL_LINUX_DRM_FOURCC_EXT, DRM_FORMAT_R8,
                 EGL_NONE
             };
-            gpu_structs.egl_image_y = eglCreateImageKHR(this->egl_display, this->egl_ctx, EGL_GL_TEXTURE_2D, 
+            gpu_structs.egl_image_y = eglCreateImageKHR(this->egl_display, this->egl_ctx, EGL_GL_TEXTURE_2D_KHR, 
                                                     (EGLClientBuffer)(uintptr_t)gpu_structs.y_tex, y_attrs);
             if (gpu_structs.egl_image_y == EGL_NO_IMAGE) {
                 err = eglGetError();
@@ -476,10 +486,10 @@ namespace phntm {
             EGLint uv_attrs[] = {
                 EGL_GL_TEXTURE_LEVEL_KHR, 0,
                 EGL_IMAGE_PRESERVED_KHR, EGL_TRUE,
-                // EGL_LINUX_DRM_FOURCC_EXT, DRM_FORMAT_GR88,
+                EGL_LINUX_DRM_FOURCC_EXT, DRM_FORMAT_GR88,
                 EGL_NONE
             };
-            gpu_structs.egl_image_uv = eglCreateImageKHR(this->egl_display, this->egl_ctx, EGL_GL_TEXTURE_2D, 
+            gpu_structs.egl_image_uv = eglCreateImageKHR(this->egl_display, this->egl_ctx, EGL_GL_TEXTURE_2D_KHR, 
                                                     (EGLClientBuffer)(uintptr_t)gpu_structs.uv_tex, uv_attrs);
             if (gpu_structs.egl_image_uv == EGL_NO_IMAGE) {
                 err = eglGetError();
@@ -520,7 +530,7 @@ namespace phntm {
             attribs_ext_buf.buffers[0] = gpu_structs.y_fd;
             attribs_ext_buf.buffers[1] = gpu_structs.uv_fd;
             attribs_ext_buf.num_buffers = 2;
-            attribs_ext_buf.flags = VA_SURFACE_ATTRIB_MEM_TYPE_DRM_PRIME;
+            attribs_ext_buf.flags = VA_SURFACE_ATTRIB_MEM_TYPE_DRM_PRIME | VA_SURFACE_ATTRIB_USAGE_HINT_ENCODER;
 
             VASurfaceAttrib attribs[2] = {
                 {
@@ -538,7 +548,7 @@ namespace phntm {
             
             // va_surface = 0;
             VAStatus status = vaCreateSurfaces(this->va_display,
-                                            VA_RT_FORMAT_YUV420,
+                                            VA_RT_FORMAT_YUV420,  // Changed from YUV422 to YUV420 to match NV12 format
                                             this->width, this->height,
                                             &gpu_structs.va_surface, 1,
                                             attribs, 2);
@@ -557,21 +567,30 @@ namespace phntm {
 
             this->log(l + "Making VA frame");
             gpu_structs.va_frame = av_frame_alloc();
-            if (!gpu_structs.va_frame) {
-                this->err("Failed to allocate VA frame");
-                vaDestroySurfaces(this->va_display, &gpu_structs.va_surface, 1);
-                eglDestroyImageKHR(this->egl_display, gpu_structs.egl_image_y);
-                eglDestroyImageKHR(this->egl_display, gpu_structs.egl_image_uv);
-                close(gpu_structs.y_fd);
-                close(gpu_structs.uv_fd);
+            // if (!gpu_structs.va_frame) {
+            //     this->err("Failed to allocate VA frame");
+            //     vaDestroySurfaces(this->va_display, &gpu_structs.va_surface, 1);
+            //     eglDestroyImageKHR(this->egl_display, gpu_structs.egl_image_y);
+            //     eglDestroyImageKHR(this->egl_display, gpu_structs.egl_image_uv);
+            //     close(gpu_structs.y_fd);
+            //     close(gpu_structs.uv_fd);
+            //     return false;
+            // }
+
+            err = av_hwframe_get_buffer(this->hw_frames_ctx, gpu_structs.va_frame, 0);
+            if (err < 0) {
+                char errbuf[64];
+                av_strerror(err, errbuf, sizeof(errbuf));
+                this->err("Failed to get frame buffer from pool: " + std::string(errbuf));
+                av_frame_free(&gpu_structs.va_frame);
                 return false;
             }
 
-            gpu_structs.va_frame->format = AV_PIX_FMT_VAAPI;
-            gpu_structs.va_frame->hw_frames_ctx = av_buffer_ref(this->codec_ctx->hw_frames_ctx);
+            // gpu_structs.va_frame->format = AV_PIX_FMT_VAAPI; // this has no effect on anything
+            // gpu_structs.va_frame->hw_frames_ctx = av_buffer_ref(this->codec_ctx->hw_frames_ctx);
             gpu_structs.va_frame->data[3] = (uint8_t*)(uintptr_t)gpu_structs.va_surface;  // Store VASurfaceID in data[3]    
-            gpu_structs.va_frame->width = this->width;
-            gpu_structs.va_frame->height = this->height;
+            // gpu_structs.va_frame->width = this->width;
+            // gpu_structs.va_frame->height = this->height;
 
             // Set up cleanup callback
             struct VAAPICleanupData {
@@ -844,7 +863,35 @@ namespace phntm {
             return false;
         }
 
-        vaSyncSurface(this->va_display, gpu_structs.va_surface);
+        // Debug UV texture (half resolution due to NV12 format)
+        if (!debugTexture(gpu_structs.uv_tex, this->width/2, this->height/2)) {
+            oss << std::hex << err;  // lowercase hex, no prefix
+            std::string err_hex = oss.str();
+            oss.clear();
+            this->err("OpenGL error checking UV texture: 0x" + err_hex);
+            return false;
+        }
+
+        // Wait for surface to be ready
+        VAStatus sync_status = vaSyncSurface(this->va_display, gpu_structs.va_surface);
+        if (sync_status != VA_STATUS_SUCCESS) {
+            this->err("Surface sync failed: " + std::string(vaErrorStr(sync_status)));
+            return false;
+        }
+
+        VASurfaceStatus surface_status;
+        VAStatus query_status = vaQuerySurfaceStatus(this->va_display, gpu_structs.va_surface, &surface_status);
+        if (query_status != VA_STATUS_SUCCESS) {
+            this->err("Surface status query failed: " + std::string(vaErrorStr(query_status)));
+            return false;
+        }
+
+        this->log("Surface status: " + std::to_string(surface_status));
+        
+        if (surface_status != VASurfaceReady) {
+            this->err("Surface not ready, status: " + std::to_string(surface_status));
+            return false;
+        }
 
         // VAImage image;
         // VAStatus s = vaDeriveImage(this->va_display, gpu_structs.va_surface, &image);
@@ -878,10 +925,12 @@ namespace phntm {
         // Encode the frame
         this->log("Sending frame to encoder");
         int ret = avcodec_send_frame(this->codec_ctx, gpu_structs.va_frame);
-        // this->log("Send frame returned="+ std::to_string(ret));
+        this->log("Send frame returned=" + std::to_string(ret));
 
         if (ret < 0) {
-            this->err("Error sending frame to encoder; ret=" + std::to_string(ret));
+            char errbuf[256];
+            av_strerror(ret, errbuf, sizeof(errbuf));
+            this->err("Error sending frame to encoder: " + std::string(errbuf) + " (ret=" + std::to_string(ret) + ")");
             return false;
         }
         
