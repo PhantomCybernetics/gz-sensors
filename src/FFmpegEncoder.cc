@@ -532,7 +532,7 @@ namespace phntm {
             attribs_ext_buf.num_buffers = 2;
             attribs_ext_buf.flags = VA_SURFACE_ATTRIB_MEM_TYPE_DRM_PRIME | VA_SURFACE_ATTRIB_USAGE_HINT_ENCODER;
 
-            VASurfaceAttrib attribs[2] = {
+            VASurfaceAttrib surface_attribs[3] = {
                 {
                     VASurfaceAttribMemoryType,
                     VA_SURFACE_ATTRIB_SETTABLE,
@@ -542,16 +542,21 @@ namespace phntm {
                     VASurfaceAttribExternalBufferDescriptor,
                     VA_SURFACE_ATTRIB_SETTABLE,
                     { VAGenericValueTypePointer, { } }
+                },
+                {
+                    VASurfaceAttribPixelFormat,
+                    VA_SURFACE_ATTRIB_SETTABLE,
+                    { VAGenericValueTypeInteger, VA_FOURCC_NV12}
                 }
             };
-            attribs[1].value.value.p = &attribs_ext_buf;
+            surface_attribs[1].value.value.p = &attribs_ext_buf;
             
             // va_surface = 0;
             VAStatus status = vaCreateSurfaces(this->va_display,
                                             VA_RT_FORMAT_YUV420,  // Changed from YUV422 to YUV420 to match NV12 format
                                             this->width, this->height,
                                             &gpu_structs.va_surface, 1,
-                                            attribs, 2);
+                                            surface_attribs, 3);
             //free(ext_buf.buffers);
             
             if (status != VA_STATUS_SUCCESS) {
