@@ -243,10 +243,15 @@ namespace phntm {
 
             std::unique_lock<std::mutex> scaler_lock(this->scaler_mutex);
             this->scaler_cv.wait(scaler_lock, [this] { return !this->scaler_queue.empty() || !this->running; });
+
             if (this->scaler_queue.empty() || !this->running) 
                 break;
-            ScalerRequest req = this->scaler_queue.front();
-            this->scaler_queue.pop();
+            
+            ScalerRequest req;
+            while (!this->scaler_queue.empty()) {
+                req = this->scaler_queue.front();
+                this->scaler_queue.pop();
+            }
 
             scaler_lock.unlock();
 
@@ -310,8 +315,11 @@ namespace phntm {
             if (this->encoder_queue.empty()) 
                 break;
 
-            AVFrame* frame = this->encoder_queue.front();
-            this->encoder_queue.pop();
+            AVFrame* frame;
+            while (!this->encoder_queue.empty()) {
+                frame = this->encoder_queue.front();
+                this->encoder_queue.pop();
+            }
 
             queue_lock.unlock();
 
