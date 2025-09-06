@@ -84,3 +84,18 @@ void gz::sensors::DirectRosNode::ReleaseDirectROSNode(std::string node_name, voi
   }
   
 }
+
+void gz::sensors::DirectRosNode::SetCurrentStamp(builtin_interfaces::msg::Time *stamp,  std::chrono::steady_clock::duration timestamp) {
+    // Split into seconds and nanoseconds
+    // gz::msgs::Time ret;
+    // Set(&ret, timestamp);
+    auto seconds = std::chrono::duration_cast<std::chrono::seconds>(timestamp);
+    std::int32_t sec = static_cast<std::int32_t>(seconds.count());
+
+    // Get remaining nanoseconds
+    auto nanoseconds = std::chrono::duration_cast<std::chrono::nanoseconds>(timestamp - seconds);
+    std::uint32_t nsec = static_cast<std::uint32_t>(nanoseconds.count());
+
+    stamp->sec = sec;
+    stamp->nanosec = nsec;
+}

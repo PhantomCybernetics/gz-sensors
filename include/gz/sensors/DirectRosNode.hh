@@ -12,13 +12,16 @@ namespace gz
   namespace sensors
   {
 
+    // const int NS_TO_SEC = 1000000000;
+
     class DirectRosNode {
 
         public:
             static std::shared_ptr<rclcpp::Node> GetDirectROSNode(std::string node_name, void* owner_ptr);
             static void ReleaseDirectROSNode(std::string node_name, void* owner_ptr);
             static std::mutex mutex;
-            
+            static void SetCurrentStamp(builtin_interfaces::msg::Time *stamp,  std::chrono::steady_clock::duration timestamp);
+
         private:
 
             struct NodeRef {

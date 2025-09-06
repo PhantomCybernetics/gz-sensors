@@ -15,6 +15,7 @@
  *
 */
 
+#include <cmath>
 #include <gz/msgs/image.pb.h>
 #include <gz/msgs/pointcloud_packed.pb.h>
 
@@ -40,6 +41,10 @@
 #include "gz/sensors/RenderingEvents.hh"
 
 #include "PointCloudUtil.hh"
+
+#include "gz/sensors/DirectRosNode.hh"
+#include "std_msgs/msg/header.hpp"
+#include <sensor_msgs/msg/image.hpp>
 
 // undefine near and far macros from windows.h
 #ifdef _WIN32
@@ -141,6 +146,12 @@ class gz::sensors::DepthCameraSensorPrivate
 
   /// \brief publisher to publish point cloud
   public: transport::Node::Publisher pointPub;
+
+  public:
+    std::shared_ptr<rclcpp::Node> directRosNode;
+    std::string directRosNodeName = "gz_cameras_direct";
+    std::shared_ptr<rclcpp::Publisher<sensor_msgs::msg::Image>> imagePub;
+    std::chrono::steady_clock::time_point last_debug_time;
 };
 
 using namespace gz;
@@ -217,6 +228,11 @@ DepthCameraSensor::DepthCameraSensor()
 //////////////////////////////////////////////////
 DepthCameraSensor::~DepthCameraSensor()
 {
+  if (this->dataPtr->directRosNode != nullptr) {
+    this->dataPtr->imagePub.reset();
+    DirectRosNode::ReleaseDirectROSNode(this->dataPtr->directRosNodeName, this->dataPtr.get());
+    this->dataPtr->directRosNode.reset();
+  }
   this->dataPtr->depthConnection.reset();
   this->dataPtr->pointCloudConnection.reset();
   if (this->dataPtr->depthBuffer)
@@ -267,17 +283,34 @@ bool DepthCameraSensor::Load(const sdf::Sensor &_sdf)
 
   this->dataPtr->sdfSensor = _sdf;
 
-  if (this->Topic().empty())
-    this->SetTopic("/camera/depth");
+  // if (this->Topic().empty())
+  //   this->SetTopic("/camera/depth");
 
-  this->dataPtr->pub =
-      this->dataPtr->node.Advertise<msgs::Image>(
-          this->Topic());
-  if (!this->dataPtr->pub)
-  {
-    gzerr << "Unable to create publisher on topic["
-      << this->Topic() << "].\n";
+  // this->dataPtr->pub =
+  //     this->dataPtr->node.Advertise<msgs::Image>(
+  //         this->Topic());
+  // if (!this->dataPtr->pub)
+  // {
+  //   gzerr << "Unable to create publisher on topic["
+  //     << this->Topic() << "].\n";
+  //   return false;
+  // }
+
+  auto sdf_camera = _sdf.Element()->GetElement("camera");
+  
+  std::cout << "DepthCamera [" << this->Name() << "] getting direct ROS node" << std::endl;
+  this->dataPtr->directRosNode = DirectRosNode::GetDirectROSNode(this->dataPtr->directRosNodeName, this->dataPtr.get());
+  if (this->dataPtr->directRosNode == nullptr) {
+     gzerr << "Failed creating direct ROS node for DepthCamera sensor [" << this->Name() << "]" << std::endl;
     return false;
+  }
+
+  // direct uncompressed output
+  if (!this->Topic().empty()) {
+    rclcpp::QoS qos(10);
+    // qos.best_effort();
+    // qos.transient_local();
+    this->dataPtr->imagePub = this->dataPtr->directRosNode->create_publisher<sensor_msgs::msg::Image>(this->Topic(), qos);
   }
 
   gzdbg << "Depth images for [" << this->Name() << "] advertised on ["
@@ -335,6 +368,8 @@ bool DepthCameraSensor::CreateCamera()
     gzerr << "Unable to access camera SDF element\n";
     return false;
   }
+
+  std::cout << "Creating DepthCamera " << cameraSdf->ImageWidth() << "x" << cameraSdf->ImageHeight() << std::endl;
 
   unsigned int width = cameraSdf->ImageWidth();
   unsigned int height = cameraSdf->ImageHeight();
@@ -467,7 +502,7 @@ void DepthCameraSensor::OnNewDepthFrame(const float *_scan,
 {
   GZ_PROFILE("DepthCameraSensor::OnNewDepthFrame");
   std::lock_guard<std::mutex> lock(this->dataPtr->mutex);
-
+  
   unsigned int depthSamples = _width * _height;
   unsigned int depthBufferSize = depthSamples * sizeof(float);
 
@@ -535,6 +570,12 @@ void DepthCameraSensor::SetScene(rendering::ScenePtr _scene)
   }
 }
 
+std::string getThreadId() {
+    std::ostringstream oss;
+    oss << std::this_thread::get_id();
+    return oss.str();
+}
+
 //////////////////////////////////////////////////
 bool DepthCameraSensor::Update(
   const std::chrono::steady_clock::duration &_now)
@@ -558,12 +599,15 @@ bool DepthCameraSensor::Update(
     this->PublishInfo(_now);
   }
 
-  if (!this->HasDepthConnections() && !this->HasPointConnections())
+  auto hasDepthConnections = this->HasDepthConnections();
+  auto hasPointConnections = this->HasPointConnections();
+
+  if (!hasDepthConnections && !hasPointConnections)
   {
     return false;
   }
 
-  if (this->HasPointConnections() && !this->dataPtr->pointCloudConnection)
+  if (hasPointConnections && !this->dataPtr->pointCloudConnection)
   {
     this->dataPtr->pointCloudConnection =
         this->dataPtr->depthCamera->ConnectNewRgbPointCloud(
@@ -579,49 +623,43 @@ bool DepthCameraSensor::Update(
   // generate sensor data
   this->Render();
 
+  // if (this->dataPtr->last_debug_time == std::chrono::steady_clock::time_point{}) {
+  //   std::cout << "Rednering dT init\n" << std::flush;
+  // } else {
+  //   auto dT = std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now() - this->dataPtr->last_debug_time).count();
+
+  //   if (dT > 44) 
+  //     std::cout << "[" << getThreadId() << "] DEP dT=" << "\033[31m" << dT << "ms" << "\033[0m" << std::endl << std::flush;
+  //   else
+  //     std::cout << "[" << getThreadId() << "] DEPdT=" << dT << "ms" << std::endl << std::flush;
+  // }
+  // this->dataPtr->last_debug_time = std::chrono::steady_clock::now();
+
   unsigned int width = this->dataPtr->depthCamera->ImageWidth();
   unsigned int height = this->dataPtr->depthCamera->ImageHeight();
 
-  auto msgsFormat = msgs::PixelFormatType::R_FLOAT32;
+  if (hasDepthConnections) {
+    std::lock_guard<std::mutex> lock(this->dataPtr->mutex);
+    if (this->dataPtr->depthBuffer != nullptr) {
+      sensor_msgs::msg::Image msg;
+      GZ_PROFILE("DepthCameraSensor::Update Publish");
+      msg.header = std_msgs::msg::Header();
+      msg.header.frame_id = this->OpticalFrameId();
+      msg.step = width * sizeof(float);
+      DirectRosNode::SetCurrentStamp(&msg.header.stamp, _now);
+      msg.encoding = "32FC1";
+      msg.width = width;
+      msg.height = height;
 
-  // create message
-  msgs::Image msg;
-  msg.set_width(width);
-  msg.set_height(height);
-  msg.set_step(width * rendering::PixelUtil::BytesPerPixel(
-               rendering::PF_FLOAT32_R));
-  msg.set_pixel_format_type(msgsFormat);
-  *msg.mutable_header()->mutable_stamp() = msgs::Convert(_now);
-
-  auto* frame = msg.mutable_header()->add_data();
-  frame->set_key("frame_id");
-  frame->add_value(this->OpticalFrameId());
-
-  std::lock_guard<std::mutex> lock(this->dataPtr->mutex);
-  msg.set_data(this->dataPtr->depthBuffer,
-      rendering::PixelUtil::MemorySize(rendering::PF_FLOAT32_R,
-      width, height));
-  this->AddSequence(msg.mutable_header(), "default");
-
-  {
-    GZ_PROFILE("DepthCameraSensor::Update Publish");
-    this->dataPtr->pub.Publish(msg);
-  }
-
-  if (this->dataPtr->imageEvent.ConnectionCount() > 0u)
-  {
-    // Trigger callbacks.
-    try
-    {
-      this->dataPtr->imageEvent(msg);
-    }
-    catch(...)
-    {
-      gzerr << "Exception thrown in an image callback.\n";
+      msg.data.assign(reinterpret_cast<unsigned char*>(this->dataPtr->depthBuffer),
+                      reinterpret_cast<unsigned char*>(this->dataPtr->depthBuffer) + (sizeof(float) * width * height));
+      GZ_PROFILE("CameraSensor::Update Publish");
+      
+      this->dataPtr->imagePub->publish(msg);
     }
   }
 
-  if (this->HasPointConnections() &&
+  if (hasPointConnections &&
       this->dataPtr->pointCloudBuffer)
   {
     // Set the time stamp
@@ -694,8 +732,9 @@ bool DepthCameraSensor::HasConnections() const
 //////////////////////////////////////////////////
 bool DepthCameraSensor::HasDepthConnections() const
 {
-  return (this->dataPtr->pub && this->dataPtr->pub.HasConnections())
-         || this->dataPtr->imageEvent.ConnectionCount() > 0u;
+  // return (this->dataPtr->pub && this->dataPtr->pub.HasConnections())
+  //        || this->dataPtr->imageEvent.ConnectionCount() > 0u;
+  return (this->dataPtr->imagePub && this->dataPtr->imagePub->get_subscription_count() > 0);
 }
 
 //////////////////////////////////////////////////

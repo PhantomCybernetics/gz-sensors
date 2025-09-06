@@ -28,24 +28,24 @@ namespace phntm {
         
         // find hardware device type
         if (hw_device == "cuda") {
-            hw_device_type = av_hwdevice_find_type_by_name("cuda");
+            this->hw_device_type = av_hwdevice_find_type_by_name("cuda");
         } else if (hw_device == "vaapi") {
-            hw_device_type = av_hwdevice_find_type_by_name("vaapi");
+            this->hw_device_type = av_hwdevice_find_type_by_name("vaapi");
         } else {
-            hw_device_type = AV_HWDEVICE_TYPE_NONE;
+            this->hw_device_type = AV_HWDEVICE_TYPE_NONE;
         }
 
         // find the H.264 encoder
         const AVCodec* codec = nullptr;
-        if (hw_device_type != AV_HWDEVICE_TYPE_NONE) {
+        if (this->hw_device_type != AV_HWDEVICE_TYPE_NONE) {
             if (hw_device == "cuda") {
-                RCLCPP_INFO(this->node->get_logger(), "[AVCodec] Setting codec to cuda");
+                RCLCPP_INFO(this->node->get_logger(), "[%s] Setting codec to cuda", this->toString().c_str());
                 codec = avcodec_find_encoder_by_name("h264_nvenc"); // NVIDIA
             } else if (hw_device == "vaapi") {
-                RCLCPP_INFO(this->node->get_logger(), "[AVCodec] Setting codec to h264_amf");
+                RCLCPP_INFO(this->node->get_logger(), "[%s] Setting codec to h264_amf", this->toString().c_str());
                 codec = avcodec_find_encoder_by_name("h264_amf"); // AMD
                 if (!codec) {
-                    RCLCPP_INFO(this->node->get_logger(), "[AVCodec] Setting codec to h264_vaapi");
+                    RCLCPP_INFO(this->node->get_logger(), "[%s] Setting codec to h264_vaapi", this->toString().c_str());
                     codec = avcodec_find_encoder_by_name("h264_vaapi"); // Intel
                 }
             }

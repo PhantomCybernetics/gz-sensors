@@ -15,6 +15,7 @@
  *
 */
 
+#include <chrono>
 #include <gz/msgs/camera_info.pb.h>
 #include <gz/msgs/image.pb.h>
 
@@ -224,6 +225,7 @@ class gz::sensors::CameraSensorPrivate
     int encoderGOPSize = 60;
     int encoderBitRate = 1000000;
     bool encoderError = false;
+    std::chrono::steady_clock::time_point last_debug_time;
 };
 
 //////////////////////////////////////////////////
@@ -448,7 +450,7 @@ bool CameraSensor::Load(const sdf::Sensor &_sdf)
 
   // direct uncompressed output
   if (!this->Topic().empty()) {
-    rclcpp::QoS qos(1);
+    rclcpp::QoS qos(10);
     // qos.best_effort();
     // qos.transient_local();
     this->dataPtr->imagePub = this->dataPtr->directRosNode->create_publisher<sensor_msgs::msg::Image>(this->Topic(), qos);
@@ -457,7 +459,7 @@ bool CameraSensor::Load(const sdf::Sensor &_sdf)
   // direct h264 compressed output
   this->dataPtr->h264Topic = sdf_camera->HasElement("camera_h264_topic") ? sdf_camera->GetElement("camera_h264_topic")->GetValue()->GetAsString() : "";
   if (!this->dataPtr->h264Topic.empty()) {
-    rclcpp::QoS qos(1);
+    rclcpp::QoS qos(10);
     // qos.best_effort();
     this->dataPtr->h264Pub = this->dataPtr->directRosNode->create_publisher<ffmpeg_image_transport_msgs::msg::FFMPEGPacket>(this->dataPtr->h264Topic, qos);
   }
@@ -582,20 +584,10 @@ void CameraSensor::SetScene(gz::rendering::ScenePtr _scene)
   }
 }
 
-const int NS_TO_SEC = 1000000000;
-void setCurrentStamp(builtin_interfaces::msg::Time *stamp,  std::chrono::steady_clock::duration timestamp) {
-    // Split into seconds and nanoseconds
-    // gz::msgs::Time ret;
-    // Set(&ret, timestamp);
-    auto seconds = std::chrono::duration_cast<std::chrono::seconds>(timestamp);
-    std::int32_t sec = static_cast<std::int32_t>(seconds.count());
-
-    // Get remaining nanoseconds
-    auto nanoseconds = std::chrono::duration_cast<std::chrono::nanoseconds>(timestamp - seconds);
-    std::uint32_t nsec = static_cast<std::uint32_t>(nanoseconds.count());
-
-    stamp->sec = sec;
-    stamp->nanosec = nsec;
+std::string getThreadId() {
+    std::ostringstream oss;
+    oss << std::this_thread::get_id();
+    return oss.str();
 }
 
 //////////////////////////////////////////////////
@@ -659,6 +651,17 @@ bool CameraSensor::Update(const std::chrono::steady_clock::duration &_now)
     this->Render();
     {
       GZ_PROFILE("CameraSensor::Update Copy image");
+      // if (this->dataPtr->last_debug_time == std::chrono::steady_clock::time_point{}) {
+      //   std::cout << "Rednering dT init\n" << std::flush;
+      // } else {
+      //   auto dT = std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now() - this->dataPtr->last_debug_time).count();
+
+      //   if (dT > 44) 
+      //     std::cout << "[" << getThreadId() << "] CAM dT=" << "\033[31m" << dT << "ms" << "\033[0m" << std::endl << std::flush;
+      //   else
+      //     std::cout << "[" << getThreadId() << "] CAM dT=" << dT << "ms" << std::endl << std::flush;
+      // }
+      // this->dataPtr->last_debug_time = std::chrono::steady_clock::now();
       this->dataPtr->camera->Copy(*image_buffer); // copy here
     }
     
@@ -772,7 +775,7 @@ bool CameraSensor::Update(const std::chrono::steady_clock::duration &_now)
           std_msgs::msg::Header header;
           header = std_msgs::msg::Header();
           header.frame_id = this->dataPtr->opticalFrameId;
-          setCurrentStamp(&header.stamp, _now);
+          DirectRosNode::SetCurrentStamp(&header.stamp, _now);
           this->dataPtr->encoder->encodeFrame(frame, header);
         }
     }
@@ -784,9 +787,7 @@ bool CameraSensor::Update(const std::chrono::steady_clock::duration &_now)
         GZ_PROFILE("CameraSensor::Update Message");
         msg.header = std_msgs::msg::Header();
         msg.header.frame_id = this->dataPtr->opticalFrameId;
-        // msg.header.stamp.sec = ;
-        // msg.header.stamp.nanosec = ;
-        setCurrentStamp(&msg.header.stamp, _now);
+        DirectRosNode::SetCurrentStamp(&msg.header.stamp, _now);
         msg.encoding = camera_image_format;
         msg.width = width;
         msg.height = height;
