@@ -46,6 +46,7 @@ target_link_libraries(${PROJECT_LIBRARY_TARGET_NAME}
     gz-common${GZ_COMMON_VER}::gz-common${GZ_COMMON_VER}
     gz-transport${GZ_TRANSPORT_VER}::gz-transport${GZ_TRANSPORT_VER}
     sdformat${SDF_VER}::sdformat${SDF_VER}
+    gz-rendering8
   PRIVATE
     gz-common${GZ_COMMON_VER}::profiler
     gz-msgs${GZ_MSGS_VER}::gz-msgs${GZ_MSGS_VER}
@@ -108,8 +109,12 @@ target_include_directories(${camera_target} PUBLIC
     /opt/ros/jazzy/include/rosgraph_msgs
     /opt/ros/jazzy/include/rosidl_typesupport_cpp
     /opt/ros/jazzy/include/rosidl_typesupport_c
+    /gz_ws/install/gz-rendering8/include/gz/rendering8
     ${OpenCV_INCLUDE_DIRS}
     ${FFMPEG_INCLUDE_DIRS}
+    /opt/ros/jazzy/opt/gz_ogre_next_vendor/include/OGRE-Next
+    /opt/ros/jazzy/opt/gz_ogre_next_vendor/include/OGRE-Next/Hlms/Pbs
+    /opt/ros/jazzy/opt/gz_ogre_next_vendor/include/OGRE-Next/Hlms/Common
     /usr/include/opencv4
 )
 # custom compile definitions since the one provided automatically is versioned and will
@@ -140,6 +145,7 @@ target_link_libraries(${camera_target}
   PRIVATE
     gz-msgs${GZ_MSGS_VER}::gz-msgs${GZ_MSGS_VER}
     gz-transport${GZ_TRANSPORT_VER}::gz-transport${GZ_TRANSPORT_VER}
+    gz-rendering8::ogre2
     ${OpenCV_LIBS}
     ${FFMPEG_LINK_FLAGS}
     ${AVFORMAT}
@@ -261,6 +267,8 @@ target_link_libraries(${thermal_camera_target}
     gz-transport${GZ_TRANSPORT_VER}::gz-transport${GZ_TRANSPORT_VER}
 )
 
+find_package(vision_msgs REQUIRED)
+
 set(boundingbox_camera_sources BoundingBoxCameraSensor.cc)
 gz_add_component(boundingbox_camera SOURCES ${boundingbox_camera_sources} GET_TARGET_NAME boundingbox_camera_target)
 target_link_libraries(${boundingbox_camera_target}
@@ -268,6 +276,46 @@ target_link_libraries(${boundingbox_camera_target}
     ${camera_target}
     gz-msgs${GZ_MSGS_VER}::gz-msgs${GZ_MSGS_VER}
     gz-transport${GZ_TRANSPORT_VER}::gz-transport${GZ_TRANSPORT_VER}
+)
+
+target_include_directories(${boundingbox_camera_target} PUBLIC
+    /opt/ros/jazzy/include/type_description_interfaces
+    /opt/ros/jazzy/include/service_msgs
+    /opt/ros/jazzy/include/rosidl_dynamic_typesupport
+    /opt/ros/jazzy/include/rclcpp
+    /opt/ros/jazzy/include/std_msgs
+    /opt/ros/jazzy/include/vision_msgs
+    /opt/ros/jazzy/include/vision_msgs
+    /opt/ros/jazzy/include/std_srvs
+    /opt/ros/jazzy/include/ament_index_cpp
+    /opt/ros/jazzy/include/libstatistics_collector
+    /opt/ros/jazzy/include/builtin_interfaces
+    /opt/ros/jazzy/include/rosidl_runtime_c
+    /opt/ros/jazzy/include/rcutils
+    /opt/ros/jazzy/include/rosidl_typesupport_interface
+    /opt/ros/jazzy/include/fastcdr
+    /opt/ros/jazzy/include/rosidl_runtime_cpp
+    /opt/ros/jazzy/include/rosidl_typesupport_fastrtps_cpp
+    /opt/ros/jazzy/include/rmw
+    /opt/ros/jazzy/include/rosidl_typesupport_fastrtps_c
+    /opt/ros/jazzy/include/rosidl_typesupport_introspection_c
+    /opt/ros/jazzy/include/rosidl_typesupport_introspection_cpp
+    /opt/ros/jazzy/include/rcl
+    /opt/ros/jazzy/include/rcl_interfaces
+    /opt/ros/jazzy/include/rcl_logging_interface
+    /opt/ros/jazzy/include/rcl_yaml_param_parser
+    /opt/ros/jazzy/include/tracetools
+    /opt/ros/jazzy/include/rcpputils
+    /opt/ros/jazzy/include/statistics_msgs
+    /opt/ros/jazzy/include/rosgraph_msgs
+    /opt/ros/jazzy/include/rosidl_typesupport_cpp
+    /opt/ros/jazzy/include/rosidl_typesupport_c
+)
+ament_target_dependencies(${boundingbox_camera_target}
+  PUBLIC
+    rclcpp
+    std_msgs
+    vision_msgs
 )
 
 set(segmentation_camera_sources SegmentationCameraSensor.cc)

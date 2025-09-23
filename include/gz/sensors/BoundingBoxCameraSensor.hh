@@ -79,7 +79,12 @@ namespace gz
 
       /// \brief Callback on new bounding boxes from bounding boxes camera
       /// \param[in] _boxes Detected bounding boxes from the camera
-      public: void OnNewBoundingBoxes(
+      public: void OnNewBoundingBoxes2D(
+        const std::vector<rendering::BoundingBox> &_boxes);
+
+      /// \brief Callback on new bounding boxes from bounding boxes camera
+      /// \param[in] _boxes Detected bounding boxes from the camera
+      public: void OnNewBoundingBoxes3D(
         const std::vector<rendering::BoundingBox> &_boxes);
 
       /// \brief Set the rendering scene.
@@ -97,6 +102,12 @@ namespace gz
 
       /// \brief Check if there are any subscribers
       /// \return True if there are subscribers, false otherwise
+      public: virtual bool Has2DConnections() const;
+
+      /// \brief Check if there are any subscribers
+      /// \return True if there are subscribers, false otherwise
+      public: virtual bool Has3DConnections() const;
+      
       public: virtual bool HasConnections() const override;
 
       /// \brief Create a camera in a scene

@@ -258,9 +258,10 @@ void BoundingBoxCameraSensorTest::BoxesWithBuiltinSDF(
   camera->SetLocalRotation(0.0, 0.0, 0.0);
   camera->SetAspectRatio(1.333);
   camera->SetHFOV(GZ_PI / 2);
-  camera->SetBoundingBoxType(rendering::BoundingBoxType::BBT_VISIBLEBOX2D);
+  camera->SetBoundingBoxType(rendering::BoundingBoxType::BBT_VISIBLEBOX2D, rendering::BoundingBoxType::BBT_BOX3D);
 
-  EXPECT_EQ(camera->Type(), rendering::BoundingBoxType::BBT_VISIBLEBOX2D);
+  EXPECT_EQ(camera->Type2d(), rendering::BoundingBoxType::BBT_VISIBLEBOX2D);
+  EXPECT_EQ(camera->Type3d(), rendering::BoundingBoxType::BBT_BOX3D);
   EXPECT_EQ(camera->ImageWidth(), width);
   EXPECT_EQ(camera->ImageHeight(), height);
 
@@ -316,7 +317,7 @@ void BoundingBoxCameraSensorTest::BoxesWithBuiltinSDF(
   g_mutex.unlock();
 
   // Full Boxes Type Test
-  camera->SetBoundingBoxType(rendering::BoundingBoxType::BBT_FULLBOX2D);
+  camera->SetBoundingBoxType(rendering::BoundingBoxType::BBT_FULLBOX2D, rendering::BoundingBoxType::BBT_BOX3D);
 
   // wait for bounding boxes
   mgr.RunOnce(std::chrono::steady_clock::duration::zero(), true);
@@ -427,7 +428,7 @@ void BoundingBoxCameraSensorTest::Boxes3DWithBuiltinSDF(
   camera->SetLocalRotation(0.0, 0.0, 0.0);
   camera->SetAspectRatio(1.333);
   camera->SetHFOV(GZ_PI / 2);
-  camera->SetBoundingBoxType(rendering::BoundingBoxType::BBT_BOX3D);
+  camera->SetBoundingBoxType(rendering::BoundingBoxType::BBT_FULLBOX2D, rendering::BoundingBoxType::BBT_BOX3D);
 
   // Get the Msg
   std::string topic =
