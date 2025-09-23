@@ -659,8 +659,7 @@ bool DepthCameraSensor::Update(
     }
   }
 
-  if (hasPointConnections &&
-      this->dataPtr->pointCloudBuffer)
+  if (hasPointConnections && this->dataPtr->pointCloudBuffer)
   {
     // Set the time stamp
     *this->dataPtr->pointMsg.mutable_header()->mutable_stamp() =
