@@ -152,6 +152,7 @@ class gz::sensors::DepthCameraSensorPrivate
     std::string directRosNodeName = "gz_cameras_direct";
     std::shared_ptr<rclcpp::Publisher<sensor_msgs::msg::Image>> imagePub;
     std::chrono::steady_clock::time_point last_debug_time;
+    std::chrono::steady_clock::duration now;
 };
 
 using namespace gz;
@@ -503,22 +504,41 @@ void DepthCameraSensor::OnNewDepthFrame(const float *_scan,
   GZ_PROFILE("DepthCameraSensor::OnNewDepthFrame");
   std::lock_guard<std::mutex> lock(this->dataPtr->mutex);
   
-  unsigned int depthSamples = _width * _height;
-  unsigned int depthBufferSize = depthSamples * sizeof(float);
+  //unsigned int depthSamples = _width * _height;
+  //unsigned int depthBufferSize = depthSamples * sizeof(float);
 
-  common::Image::PixelFormatType format =
-    common::Image::ConvertPixelFormat(_format);
+  // common::Image::PixelFormatType format =
+  //   common::Image::ConvertPixelFormat(_format);
 
-  if (!this->dataPtr->depthBuffer)
-    this->dataPtr->depthBuffer = new float[depthSamples];
+  // if (!this->dataPtr->depthBuffer)
+  //   this->dataPtr->depthBuffer = new float[depthSamples];
 
-  memcpy(this->dataPtr->depthBuffer, _scan, depthBufferSize);
+  // memcpy(this->dataPtr->depthBuffer, _scan, depthBufferSize);
 
-  // Save image
-  if (this->dataPtr->saveImage)
-  {
-    this->dataPtr->SaveImage(_scan, _width, _height,
-        format);
+  // // Save image
+  // if (this->dataPtr->saveImage)
+  // {
+  //   this->dataPtr->SaveImage(_scan, _width, _height,
+  //       format);
+  // }
+
+  // std::lock_guard<std::mutex> lock(this->dataPtr->mutex);
+  if (_scan != nullptr) {
+    sensor_msgs::msg::Image msg;
+    GZ_PROFILE("DepthCameraSensor::Update Publish");
+    msg.header = std_msgs::msg::Header();
+    msg.header.frame_id = this->OpticalFrameId();
+    msg.step = _width * sizeof(float);
+    DirectRosNode::SetCurrentStamp(&msg.header.stamp, this->dataPtr->now);
+    msg.encoding = "32FC1";
+    msg.width = _width;
+    msg.height = _height;
+
+    msg.data.assign(reinterpret_cast<const unsigned char*>(_scan),
+                    reinterpret_cast<const unsigned char*>(_scan) + (sizeof(float) * _width * _height));
+    GZ_PROFILE("CameraSensor::Update Publish");
+    
+    this->dataPtr->imagePub->publish(msg);
   }
 }
 
@@ -620,6 +640,7 @@ bool DepthCameraSensor::Update(
     this->dataPtr->pointCloudConnection.reset();
   }
 
+  this->dataPtr->now = _now;
   // generate sensor data
   this->Render();
 
@@ -638,26 +659,26 @@ bool DepthCameraSensor::Update(
   unsigned int width = this->dataPtr->depthCamera->ImageWidth();
   unsigned int height = this->dataPtr->depthCamera->ImageHeight();
 
-  if (hasDepthConnections) {
-    std::lock_guard<std::mutex> lock(this->dataPtr->mutex);
-    if (this->dataPtr->depthBuffer != nullptr) {
-      sensor_msgs::msg::Image msg;
-      GZ_PROFILE("DepthCameraSensor::Update Publish");
-      msg.header = std_msgs::msg::Header();
-      msg.header.frame_id = this->OpticalFrameId();
-      msg.step = width * sizeof(float);
-      DirectRosNode::SetCurrentStamp(&msg.header.stamp, _now);
-      msg.encoding = "32FC1";
-      msg.width = width;
-      msg.height = height;
+  // if (hasDepthConnections) {
+  //   std::lock_guard<std::mutex> lock(this->dataPtr->mutex);
+  //   if (this->dataPtr->depthBuffer != nullptr) {
+  //     sensor_msgs::msg::Image msg;
+  //     GZ_PROFILE("DepthCameraSensor::Update Publish");
+  //     msg.header = std_msgs::msg::Header();
+  //     msg.header.frame_id = this->OpticalFrameId();
+  //     msg.step = width * sizeof(float);
+  //     DirectRosNode::SetCurrentStamp(&msg.header.stamp, _now);
+  //     msg.encoding = "32FC1";
+  //     msg.width = width;
+  //     msg.height = height;
 
-      msg.data.assign(reinterpret_cast<unsigned char*>(this->dataPtr->depthBuffer),
-                      reinterpret_cast<unsigned char*>(this->dataPtr->depthBuffer) + (sizeof(float) * width * height));
-      GZ_PROFILE("CameraSensor::Update Publish");
+  //     msg.data.assign(reinterpret_cast<unsigned char*>(this->dataPtr->depthBuffer),
+  //                     reinterpret_cast<unsigned char*>(this->dataPtr->depthBuffer) + (sizeof(float) * width * height));
+  //     GZ_PROFILE("CameraSensor::Update Publish");
       
-      this->dataPtr->imagePub->publish(msg);
-    }
-  }
+  //     this->dataPtr->imagePub->publish(msg);
+  //   }
+  // }
 
   if (hasPointConnections && this->dataPtr->pointCloudBuffer)
   {

@@ -435,7 +435,7 @@ bool CameraSensor::Load(const sdf::Sensor &_sdf)
   }
 
   this->dataPtr->sdfSensor = _sdf;
-
+  
   // if (this->Topic().empty())
   //   this->SetTopic("/camera");
 
