@@ -48,6 +48,8 @@
 #include <vision_msgs/msg/detection2_d_array.hpp>
 #include <vision_msgs/msg/detection3_d_array.hpp>
 
+#include <random>
+
 using namespace gz;
 using namespace sensors;
 
@@ -185,7 +187,9 @@ bool BoundingBoxCameraSensor::Load(const sdf::Sensor &_sdf)
     else
       this->dataPtr->type2d = rendering::BoundingBoxType::BBT_NONE;
 
-    if (type.find("3d") != std::string::npos)
+    if (type.find("marker_3d") != std::string::npos)
+      this->dataPtr->type3d = rendering::BoundingBoxType::BBT_MARKER3D;
+    else if (type.find("3d") != std::string::npos)
       this->dataPtr->type3d = rendering::BoundingBoxType::BBT_BOX3D;
     else
       this->dataPtr->type3d = rendering::BoundingBoxType::BBT_NONE;
@@ -248,12 +252,19 @@ bool BoundingBoxCameraSensor::Load(const sdf::Sensor &_sdf)
     gzdbg << "Bounding boxes 2d for [" << this->Name() << "] advertised on ["  << topicBoundingBoxes2d << std::endl;
   }
 
-  if (this->dataPtr->type3d != rendering::BoundingBoxType::BBT_NONE && !topicBoundingBoxes3d.empty())
+  if (this->dataPtr->type3d == rendering::BoundingBoxType::BBT_BOX3D && !topicBoundingBoxes3d.empty())
   {
     rclcpp::QoS qos(10);
     this->dataPtr->boxes3dPub = this->dataPtr->directRosNode->create_publisher<vision_msgs::msg::Detection3DArray>(topicBoundingBoxes3d, qos);
     gzdbg << "Bounding boxes 3d for [" << this->Name() << "] advertised on ["  << topicBoundingBoxes3d << std::endl;
   }
+
+  // if (this->dataPtr->type3d == rendering::BoundingBoxType::BBT_MARKER3D && !topicBoundingBoxes3d.empty())
+  // {
+  //   rclcpp::QoS qos(10);
+  //   this->dataPtr->boxes3dPub = this->dataPtr->directRosNode->create_publisher<vision_msgs::msg::Detection3DArray>(topicBoundingBoxes3d, qos);
+  //   gzdbg << "Bounding boxes 3d for [" << this->Name() << "] advertised on ["  << topicBoundingBoxes3d << std::endl;
+  // }
 
   // if (!this->dataPtr->boxesPublisher)
   // {
@@ -469,7 +480,10 @@ void BoundingBoxCameraSensor::OnNewBoundingBoxes2D(
 
     vision_msgs::msg::ObjectHypothesisWithPose res;
     res.hypothesis.class_id = std::to_string(box.Label());
-    res.hypothesis.score = 1.0;
+    
+    auto noise = static_cast<float>(rand()) / RAND_MAX * 0.2f;
+    res.hypothesis.score = 1.0f - noise;
+    
     det.results.push_back(res);
 
     msg.detections.push_back(det);
@@ -503,12 +517,24 @@ void BoundingBoxCameraSensor::OnNewBoundingBoxes3D(
     det.bbox.size.y = box.Size().Y();
     det.bbox.size.z = box.Size().Z();
 
+    det.bbox.center.position.x = box.Center().X();
+    det.bbox.center.position.y = box.Center().Y();
+    det.bbox.center.position.z = box.Center().Z();
+
+    det.bbox.center.orientation.x = box.Orientation().X();
+    det.bbox.center.orientation.y = box.Orientation().Y();
+    det.bbox.center.orientation.z = box.Orientation().Z();
+    det.bbox.center.orientation.w = box.Orientation().W();
+
     vision_msgs::msg::ObjectHypothesisWithPose res;
     res.hypothesis.class_id = std::to_string(box.Label());
-    res.hypothesis.score = 1.0;
-    res.pose.pose.position.x = box.Center().X();
-    res.pose.pose.position.y = box.Center().Y();
-    res.pose.pose.position.z = box.Center().Z();
+
+    auto noise = static_cast<float>(rand()) / RAND_MAX * 0.2f;
+    res.hypothesis.score = 1.0f - noise;
+
+    res.pose.pose.position.x = box.ModelPosition().X();
+    res.pose.pose.position.y = box.ModelPosition().Y();
+    res.pose.pose.position.z = box.ModelPosition().Z();
     
     res.pose.pose.orientation.x = box.Orientation().X();
     res.pose.pose.orientation.y = box.Orientation().Y();
