@@ -70,6 +70,8 @@ find_package(sensor_msgs REQUIRED)
 find_package(std_srvs REQUIRED)
 #find_package(${rendering_target} REQUIRED)
 find_package(OpenCV REQUIRED)
+pkg_check_modules(EGL REQUIRED egl)
+pkg_check_modules(GLES REQUIRED glesv2)
 
 set(camera_sources CameraSensor.cc DirectRosNode.cc FFmpegEncoder.cc)
 gz_add_component(camera
@@ -116,6 +118,8 @@ target_include_directories(${camera_target} PUBLIC
     /opt/ros/jazzy/opt/gz_ogre_next_vendor/include/OGRE-Next/Hlms/Pbs
     /opt/ros/jazzy/opt/gz_ogre_next_vendor/include/OGRE-Next/Hlms/Common
     /usr/include/opencv4
+    ${EGL_INCLUDE_DIRS}
+    ${GLES_INCLUDE_DIRS}
 )
 # custom compile definitions since the one provided automatically is versioned and will
 # make the code need to change with every major version
@@ -149,6 +153,8 @@ target_link_libraries(${camera_target}
     ${OpenCV_LIBS}
     ${FFMPEG_LINK_FLAGS}
     ${AVFORMAT}
+    ${EGL_LIBRARIES}
+    ${GLES_LIBRARIES}
 )
 
 set(depth_camera_sources DepthCameraSensor.cc)

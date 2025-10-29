@@ -23,6 +23,7 @@
 #include <libavutil/pixfmt.h>
 #include <mutex>
 #include <ostream>
+#include <queue>
 #include <string>
 
 #include <gz/common/Console.hh>
@@ -56,6 +57,13 @@
 #include <rclcpp/publisher.hpp>
 #include <rclcpp/qos.hpp>
 #include <std_msgs/msg/header.hpp>
+#include <thread>
+
+#include <EGL/egl.h>
+#include <EGL/eglext.h>
+#include <GLES3/gl31.h>
+#include <GLES2/gl2ext.h>
+#include <GLES3/gl3ext.h>
 
 using namespace gz;
 using namespace sensors;
@@ -157,9 +165,10 @@ class gz::sensors::CameraSensorPrivate
   public: gz::rendering::CameraPtr camera;
 
   /// \brief pool of pointers to an images to be published
-  uint num_image_buffers = 16;
-  uint current_image_buffer = 0;
-  std::vector<gz::rendering::Image> image_buffers;
+  uint num_pixel_buffers = 16;
+  uint current_pixel_buffer = 0;
+  uint frame_data_size = 0;
+  std::vector<std::vector<unsigned char>> pixel_buffers;
 
   /// \brief Noise added to sensor data
   public: std::map<SensorNoiseType, NoisePtr> noises;
@@ -226,6 +235,23 @@ class gz::sensors::CameraSensorPrivate
     int encoderBitRate = 1000000;
     bool encoderError = false;
     std::chrono::steady_clock::time_point last_debug_time;
+
+    bool postRenderThreadRunning;
+    std::thread postRenderThread;
+    std::mutex postRenderMutex;
+    std::condition_variable postRenderCV;
+    std::queue<uint> postRenderQueue;
+
+    bool hasImageConnections = false, hasH264Connections = false;
+    std::chrono::steady_clock::duration now;
+
+    EGLContext eglCtx = nullptr;
+    EGLDisplay eglDisplay = nullptr;
+    EGLSurface eglSurface = nullptr;
+
+    EGLContext eglWorkerCtx = nullptr;
+    bool eglWorkerCtxSet = false;
+    // EGLSurface eglWorkerSurface = nullptr;
 };
 
 //////////////////////////////////////////////////
@@ -256,6 +282,14 @@ bool CameraSensor::CreateCamera()
   this->dataPtr->camera->SetVisibilityMask(cameraSdf->VisibilityMask());
   this->dataPtr->camera->SetLocalPose(this->Pose());
   this->AddSensor(this->dataPtr->camera);
+
+  this->dataPtr->frame_data_size = width * height * 3;
+  // unsigned char *data = new unsigned char[data_size];
+  //std::vector<unsigned char> pixels(data_size);
+  for (uint i = 0; i < this->dataPtr->num_pixel_buffers; i++) {
+    std::vector<unsigned char> pixel_buffer(this->dataPtr->frame_data_size);
+    this->dataPtr->pixel_buffers.push_back(pixel_buffer);
+  }
 
   const std::map<SensorNoiseType, sdf::Noise> noises = {
     {CAMERA_NOISE, cameraSdf->ImageNoise()},
@@ -358,12 +392,6 @@ bool CameraSensor::CreateCamera()
   this->UpdateLensIntrinsicsAndProjection(this->dataPtr->camera,
       *cameraSdf);
 
-  for (uint i = 0; i < this->dataPtr->num_image_buffers; i++) {
-    auto image = this->dataPtr->camera->CreateImage();
-    this->dataPtr->image_buffers.push_back(image);
-  }
-  
-
   this->Scene()->RootVisual()->AddChild(this->dataPtr->camera);
 
   // Create the directory to store frames
@@ -376,6 +404,10 @@ bool CameraSensor::CreateCamera()
 
   // Populate camera info topic
   this->PopulateInfo(cameraSdf);
+
+  this->dataPtr->postRenderThreadRunning = true;
+  this->dataPtr->postRenderThread = std::thread(&CameraSensor::postRenderWorker, this);
+  this->dataPtr->postRenderThread.detach();
 
   return true;
 }
@@ -396,7 +428,13 @@ CameraSensor::~CameraSensor()
     this->dataPtr->directRosNode.reset();
     this->dataPtr->encoder.reset();
   }
-  this->dataPtr->image_buffers.clear();
+  for (uint i = 0; i < this->dataPtr->num_pixel_buffers; i++) {
+    this->dataPtr->pixel_buffers[i].clear();
+  }
+  this->dataPtr->pixel_buffers.clear();
+
+  this->dataPtr->postRenderThreadRunning = false;
+  this->dataPtr->postRenderCV.notify_one();
 
   if (this->Scene() && this->dataPtr->camera)
   {
@@ -614,10 +652,11 @@ bool CameraSensor::Update(const std::chrono::steady_clock::duration &_now)
     this->PublishInfo(_now);
   }
 
-  auto hasImageConnections = this->HasImageConnections();
-  auto hasH264Connections = this->HasH264Connections();
+  this->dataPtr->hasImageConnections = this->HasImageConnections();
+  this->dataPtr->hasH264Connections = this->HasH264Connections();
+  this->dataPtr->now = _now;
 
-  if (!hasImageConnections && !hasH264Connections)
+  if (!this->dataPtr->hasImageConnections && !this->dataPtr->hasH264Connections)
   {
     if (this->dataPtr->generatingData)
     {
@@ -637,42 +676,138 @@ bool CameraSensor::Update(const std::chrono::steady_clock::duration &_now)
     }
   }
 
-  if (hasImageConnections || hasH264Connections)
+  if (this->dataPtr->hasImageConnections || this->dataPtr->hasH264Connections)
   {
-    // generate sensor data
-    // std::cout << "Camera [" << this->Name() << "] rendering..." << std::endl;
 
-    gz::rendering::Image * image_buffer = &this->dataPtr->image_buffers[this->dataPtr->current_image_buffer];
-    this->dataPtr->current_image_buffer++;
-    if (this->dataPtr->current_image_buffer == this->dataPtr->num_image_buffers) {
-      this->dataPtr->current_image_buffer = 0;
-    }
-
-    this->Render();
     {
-      GZ_PROFILE("CameraSensor::Update Copy image");
-      // if (this->dataPtr->last_debug_time == std::chrono::steady_clock::time_point{}) {
-      //   std::cout << "Rednering dT init\n" << std::flush;
-      // } else {
-      //   auto dT = std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now() - this->dataPtr->last_debug_time).count();
+      std::lock_guard<std::mutex> render_lock(this->dataPtr->postRenderMutex);
+      this->Render();
+      // this->dataPtr->camera->Copy(*image_buffer); // copy here
 
-      //   if (dT > 44) 
-      //     std::cout << "[" << getThreadId() << "] CAM dT=" << "\033[31m" << dT << "ms" << "\033[0m" << std::endl << std::flush;
-      //   else
-      //     std::cout << "[" << getThreadId() << "] CAM dT=" << dT << "ms" << std::endl << std::flush;
-      // }
-      // this->dataPtr->last_debug_time = std::chrono::steady_clock::now();
-      this->dataPtr->camera->Copy(*image_buffer); // copy here
+      uint gl_id = this->RenderingCamera()->RenderTextureGLId();
+
+      // get context and display from ogre2
+      if (this->dataPtr->eglWorkerCtx == nullptr) {
+        this->dataPtr->eglCtx = eglGetCurrentContext();
+        if (this->dataPtr->eglCtx == EGL_NO_CONTEXT) {
+            std::cout << this->Name() <<  " Error getting EGL context" << std::endl;
+            return false;
+        }
+        this->dataPtr->eglDisplay = eglGetCurrentDisplay();
+        if (this->dataPtr->eglDisplay == EGL_NO_DISPLAY) {
+            std::cout << this->Name() << " Error getting EGL display" << std::endl;
+            return false;
+        }       
+        this->dataPtr->eglSurface = eglGetCurrentSurface(EGL_DRAW);
+
+        std::cout << this->Name() << " Creating worker shared ctx" << std::endl;
+        EGLConfig config;
+        EGLint numConfigs = 0;
+        
+        EGLint cfg_attribs[] = {
+          EGL_RENDERABLE_TYPE, EGL_OPENGL_ES3_BIT, // or _ES2_BIT if only ES2 supported
+          EGL_SURFACE_TYPE, EGL_PBUFFER_BIT,       // allow off‑screen surfaces
+          EGL_RED_SIZE,   8,
+          EGL_GREEN_SIZE, 8,
+          EGL_BLUE_SIZE,  8,
+          EGL_ALPHA_SIZE, 8,
+          EGL_NONE
+        };
+        eglChooseConfig(this->dataPtr->eglDisplay, cfg_attribs, &config, 1, &numConfigs);
+        if (numConfigs < 1) {
+            std::cout << this->Name() + " No matching EGLConfig found" << std::endl;
+            return false;
+        }
+        EGLint ctx_attribs[] = {
+          EGL_CONTEXT_CLIENT_VERSION, 3,
+          EGL_NONE
+        };
+        this->dataPtr->eglWorkerCtx = eglCreateContext(this->dataPtr->eglDisplay, config, this->dataPtr->eglCtx, ctx_attribs);
+        if (this->dataPtr->eglWorkerCtx == EGL_NO_CONTEXT) {
+            std::cout << this->Name() + " Error creating worker EGL context" << std::endl;
+            EGLint err = eglGetError();
+            std::cout << "eglCreateContext failed with 0x" << std::hex << err << std::endl;
+            return false;
+        }
+        
+        //this->dataPtr->eglWorkerSurface = eglCreatePbufferSurface(this->dataPtr->eglDisplay, config, {});
+      }
+      this->dataPtr->postRenderQueue.push(gl_id);  
     }
-    
+
+    this->dataPtr->postRenderCV.notify_one();
+  }
+
+  return true;
+}
+
+void CameraSensor::postRenderWorker() {
+  std::cout << this->Name() << " POST-RENDER WORKER RUNNING" << std::endl;
+  
+  while (this->dataPtr->postRenderThreadRunning) {
+
+    std::unique_lock<std::mutex> render_lock(this->dataPtr->postRenderMutex);
+    this->dataPtr->postRenderCV.wait(render_lock, [this] { return !this->dataPtr->postRenderQueue.empty() || !this->dataPtr->postRenderThreadRunning; });
+
+    if (!this->dataPtr->postRenderThreadRunning || this->dataPtr->postRenderQueue.empty() || this->dataPtr->eglWorkerCtx == nullptr || this->dataPtr->eglWorkerCtx == EGL_NO_CONTEXT) {
+      render_lock.unlock();
+      break;
+    }
+      
+    uint gl_texture_id = this->dataPtr->postRenderQueue.front();
+    this->dataPtr->postRenderQueue.pop();
+
+    if (!this->dataPtr->eglWorkerCtxSet) {
+      std::cout << this->Name() << " POST-RENDER Setting worker ctx" << std::endl;
+      eglMakeCurrent(this->dataPtr->eglDisplay, EGL_NO_SURFACE, EGL_NO_SURFACE, this->dataPtr->eglWorkerCtx);
+      this->dataPtr->eglWorkerCtxSet = true;
+    }
+
+    GLboolean is_texture = glIsTexture(gl_texture_id);
+    if (!is_texture) {
+      std::cout << this->Name() << " Invalid texture ID: " << gl_texture_id << std::endl;
+      render_lock.unlock();
+      continue;
+    }
+
+    // glMemoryBarrier(GL_SHADER_IMAGE_ACCESS_BARRIER_BIT | GL_TEXTURE_FETCH_BARRIER_BIT);
+    // glFinish(); // ensure complete
+
+    // Read back the texture data
+    GLuint fbo;
+    glGenFramebuffers(1, &fbo);
+    glBindFramebuffer(GL_FRAMEBUFFER, fbo);
+
+    // Attach Y texture to framebuffer
+    glFramebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_TEXTURE_2D, gl_texture_id, 0);
+
+    // Check framebuffer status
+    if (glCheckFramebufferStatus(GL_FRAMEBUFFER) != GL_FRAMEBUFFER_COMPLETE) {
+        std::cout << this->Name() <<  " Framebuffer not complete for texture readback" << std::endl;
+        glDeleteFramebuffers(1, &fbo);
+        render_lock.unlock();
+        continue;
+    }
+
     unsigned int width = this->dataPtr->camera->ImageWidth();
     unsigned int height = this->dataPtr->camera->ImageHeight();
-    unsigned char *data = image_buffer->Data<unsigned char>(); // no copy
 
-    // gz::common::Image::PixelFormatType
-    //     format{common::Image::UNKNOWN_PIXEL_FORMAT};
-    // msgs::PixelFormatType msgsPixelFormat =
-    //   msgs::PixelFormatType::UNKNOWN_PIXEL_FORMAT;
+    // Set viewport
+    glViewport(0, 0, width, height);
+
+    // Read pixels
+    auto pixel_buffer = &this->dataPtr->pixel_buffers[this->dataPtr->current_pixel_buffer];
+    this->dataPtr->current_pixel_buffer++;
+    if (this->dataPtr->current_pixel_buffer == this->dataPtr->num_pixel_buffers) {
+      this->dataPtr->current_pixel_buffer = 0;
+    }
+    glReadPixels(0, 0, width, height, GL_RGB, GL_UNSIGNED_BYTE, pixel_buffer->data());
+
+    // Clean up
+    glBindFramebuffer(GL_FRAMEBUFFER, 0);
+    glDeleteFramebuffers(1, &fbo);
+
+    render_lock.unlock();
 
     std::string camera_image_format = "";
     AVPixelFormat opencv_format = AV_PIX_FMT_NONE;
@@ -716,13 +851,13 @@ bool CameraSensor::Update(const std::chrono::steady_clock::duration &_now)
     }
     if (camera_image_format.empty()) {
       gzerr << "Unsupported pixel format [" << this->dataPtr->camera->ImageFormat() << "]" << " \n";
-      return false;
+      continue;
     }
     if (this->dataPtr->encoderForceInputPixelFormat != AVPixelFormat::AV_PIX_FMT_NONE) {
       codec_input_format = this->dataPtr->encoderForceInputPixelFormat;
     }
 
-    if (hasH264Connections) {
+    if (this->dataPtr->hasH264Connections) {
 
        // make encoder
         if (this->dataPtr->encoder.get() == nullptr && !this->dataPtr->encoderError) {
@@ -755,16 +890,16 @@ bool CameraSensor::Update(const std::chrono::steady_clock::duration &_now)
           switch (this->dataPtr->camera->ImageFormat())
           {
             case rendering::PF_R8G8B8:
-              frame = cv::Mat(height, width, CV_8UC3, data); // no copy
+              frame = cv::Mat(height, width, CV_8UC3, pixel_buffer->data()); // no copy
               break;
             case rendering::PF_B8G8R8:
-              frame = cv::Mat(height, width, CV_8UC3, data); // no copy
+              frame = cv::Mat(height, width, CV_8UC3, pixel_buffer->data()); // no copy
               break;
             case rendering::PF_L8: 
-              frame = cv::Mat(height, width, CV_8UC1, data); // no copy
+              frame = cv::Mat(height, width, CV_8UC1, pixel_buffer->data()); // no copy
               break;
             case rendering::PF_L16: {
-              frame = cv::Mat(height, width, CV_16UC1, data); // no copy
+              frame = cv::Mat(height, width, CV_16UC1, pixel_buffer->data()); // no copy
               break;
             }
             default:
@@ -775,62 +910,32 @@ bool CameraSensor::Update(const std::chrono::steady_clock::duration &_now)
           std_msgs::msg::Header header;
           header = std_msgs::msg::Header();
           header.frame_id = this->dataPtr->opticalFrameId;
-          DirectRosNode::SetCurrentStamp(&header.stamp, _now);
+          DirectRosNode::SetCurrentStamp(&header.stamp, this->dataPtr->now);
           this->dataPtr->encoder->encodeFrame(frame, header);
         }
     }
 
-    if (hasImageConnections) {
+    if (this->dataPtr->hasImageConnections) {
       // create ROS raw message
       sensor_msgs::msg::Image msg;
       {
         GZ_PROFILE("CameraSensor::Update Message");
         msg.header = std_msgs::msg::Header();
         msg.header.frame_id = this->dataPtr->opticalFrameId;
-        DirectRosNode::SetCurrentStamp(&msg.header.stamp, _now);
+        DirectRosNode::SetCurrentStamp(&msg.header.stamp, this->dataPtr->now);
         msg.encoding = camera_image_format;
         msg.width = width;
         msg.height = height;
-        msg.data.assign(data, data + image_buffer->MemorySize());
-        // msg.set_width(width);
-        // msg.set_height(height);
-        // msg.set_step(width * rendering::PixelUtil::BytesPerPixel(
-        //              this->dataPtr->camera->ImageFormat()));
-        // msg.set_pixel_format_type(msgsPixelFormat);
-        // *msg.mutable_header()->mutable_stamp() = msgs::Convert(_now);
-        // auto frame = msg.mutable_header()->add_data();
-        // frame->set_key("frame_id");
-        // frame->add_value(this->dataPtr->opticalFrameId);
-        // msg.set_data(data, this->dataPtr->camera->ImageMemorySize());
-     
-        // publish the image message
-        // this->AddSequence(msg.mutable_header());
+        msg.data.assign(pixel_buffer->data(), pixel_buffer->data() + this->dataPtr->frame_data_size);
+       
         GZ_PROFILE("CameraSensor::Update Publish");
         this->dataPtr->imagePub->publish(msg);
       }
     }
 
-    // Trigger callbacks.
-    // if (this->dataPtr->imageEvent.ConnectionCount() > 0)
-    // {
-    //   try
-    //   {
-    //     this->dataPtr->imageEvent(msg);
-    //   }
-    //   catch(...)
-    //   {
-    //     gzerr << "Exception thrown in an image callback.\n";
-    //   }
-    // }
 
-    // Save image
-    // if (this->dataPtr->saveImage)
-    // {
-    //   this->dataPtr->SaveImage(data, width, height, format);
-    // }
   }
-
-  return true;
+  std::cout << this->Name() << " POST-RENDER WORKER DONE" << std::endl;
 }
 
 // on subscriber thread
