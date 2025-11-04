@@ -72,6 +72,8 @@ find_package(std_srvs REQUIRED)
 find_package(OpenCV REQUIRED)
 pkg_check_modules(EGL REQUIRED egl)
 pkg_check_modules(GLES REQUIRED glesv2)
+find_package(phntm_interfaces REQUIRED)
+find_package(tf2_msgs REQUIRED)
 
 set(camera_sources CameraSensor.cc DirectRosNode.cc FFmpegEncoder.cc)
 gz_add_component(camera
@@ -87,6 +89,7 @@ target_include_directories(${camera_target} PUBLIC
     /opt/ros/jazzy/include/std_msgs
     /opt/ros/jazzy/include/sensor_msgs
     /opt/ros/jazzy/include/std_srvs
+    /ros2_ws/install/phntm_interfaces/include/
     /opt/ros/jazzy/include/ament_index_cpp
     /opt/ros/jazzy/include/libstatistics_collector
     /opt/ros/jazzy/include/builtin_interfaces
@@ -108,6 +111,7 @@ target_include_directories(${camera_target} PUBLIC
     /opt/ros/jazzy/include/rcpputils
     /opt/ros/jazzy/include/statistics_msgs
     /opt/ros/jazzy/include/ffmpeg_image_transport_msgs
+    /opt/ros/jazzy/include/tf2_msgs
     /opt/ros/jazzy/include/rosgraph_msgs
     /opt/ros/jazzy/include/rosidl_typesupport_cpp
     /opt/ros/jazzy/include/rosidl_typesupport_c
@@ -129,7 +133,9 @@ ament_target_dependencies(${camera_target}
   PUBLIC
     rclcpp
     std_msgs
+    phntm_interfaces
     sensor_msgs
+    tf2_msgs
     ffmpeg_image_transport_msgs
 )
 

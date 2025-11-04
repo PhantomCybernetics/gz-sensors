@@ -16,6 +16,7 @@
 */
 
 #include <chrono>
+#include <gz/math/Pose3.hh>
 #include <gz/msgs/camera_info.pb.h>
 #include <gz/msgs/image.pb.h>
 
@@ -24,6 +25,7 @@
 #include <mutex>
 #include <ostream>
 #include <queue>
+#include <rclcpp/subscription.hpp>
 #include <string>
 
 #include <gz/common/Console.hh>
@@ -64,6 +66,11 @@
 #include <GLES3/gl31.h>
 #include <GLES2/gl2ext.h>
 #include <GLES3/gl3ext.h>
+
+#include "phntm_interfaces/srv/get_float32.hpp"
+#include "phntm_interfaces/srv/set_float32.hpp"
+
+#include "tf2_msgs/msg/tf_message.hpp"
 
 using namespace gz;
 using namespace sensors;
@@ -251,8 +258,36 @@ class gz::sensors::CameraSensorPrivate
 
     EGLContext eglWorkerCtx = nullptr;
     bool eglWorkerCtxSet = false;
+
+    std::shared_ptr<rclcpp::Service<phntm_interfaces::srv::SetFloat32>> set_pose_z_srv;
+    std::shared_ptr<rclcpp::Service<phntm_interfaces::srv::GetFloat32>> get_pose_z_srv;
+    bool pose_dirty;
+    gz::math::Pose3d pose_to_set;
     // EGLSurface eglWorkerSurface = nullptr;
+
+    void srvSetPoseZ(std::shared_ptr<phntm_interfaces::srv::SetFloat32::Request> req, std::shared_ptr<phntm_interfaces::srv::SetFloat32::Response> res);
+    void srvGetPoseZ(std::shared_ptr<phntm_interfaces::srv::GetFloat32::Request>, std::shared_ptr<phntm_interfaces::srv::GetFloat32::Response> res);
+    void onTfStatic(std::shared_ptr<tf2_msgs::msg::TFMessage> msg);
+    std::shared_ptr<rclcpp::Publisher<tf2_msgs::msg::TFMessage>> tfStaticPub;
+    std::shared_ptr<rclcpp::Subscription<tf2_msgs::msg::TFMessage>> tfStaticSub;
+    std::shared_ptr<tf2_msgs::msg::TFMessage> lastTfStaticMsg = nullptr;
 };
+
+void CameraSensorPrivate::srvSetPoseZ(std::shared_ptr<phntm_interfaces::srv::SetFloat32::Request> req, std::shared_ptr<phntm_interfaces::srv::SetFloat32::Response> res) {
+  this->pose_to_set.SetZ(req->data);
+  this->pose_dirty = true;
+  res->data = this->pose_to_set.Z(); // confirm the new value
+  res->success = true;
+}
+
+void CameraSensorPrivate::srvGetPoseZ(std::shared_ptr<phntm_interfaces::srv::GetFloat32::Request>, std::shared_ptr<phntm_interfaces::srv::GetFloat32::Response> res) {
+  res->data = this->pose_to_set.Z();
+}
+
+void CameraSensorPrivate::onTfStatic(std::shared_ptr<tf2_msgs::msg::TFMessage> msg) {
+  std::cout <<  "Camera got TF static data" << std::endl;
+  this->lastTfStaticMsg = msg;
+}
 
 //////////////////////////////////////////////////
 bool CameraSensor::CreateCamera()
@@ -519,6 +554,29 @@ bool CameraSensor::Load(const sdf::Sensor &_sdf)
     gzdbg << "Camera [" << this->Name() << "] setting encoder_bit_rate to '" << this->dataPtr->encoderBitRate << "'" << std::endl;
   }
 
+  if (sdf_camera->HasElement("set_pose_srv_z") && !sdf_camera->GetElement("set_pose_srv_z")->GetValue()->GetAsString().empty()) {
+    this->dataPtr->pose_to_set = this->Pose();
+    this->dataPtr->pose_dirty = true; // produce /tf on start
+    auto srv_name = "/" + this->dataPtr->directRosNodeName + "/" + sdf_camera->GetElement("set_pose_srv_z")->GetValue()->GetAsString();
+    this->dataPtr->set_pose_z_srv = this->dataPtr->directRosNode->create_service<phntm_interfaces::srv::SetFloat32>(srv_name,
+                                                                                   std::bind(&CameraSensorPrivate::srvSetPoseZ, this->dataPtr.get(), std::placeholders::_1, std::placeholders::_2));
+  }
+
+  if (sdf_camera->HasElement("get_pose_srv_z") && !sdf_camera->GetElement("get_pose_srv_z")->GetValue()->GetAsString().empty()) {
+    auto srv_name = "/" + this->dataPtr->directRosNodeName + "/" + sdf_camera->GetElement("get_pose_srv_z")->GetValue()->GetAsString();
+    this->dataPtr->get_pose_z_srv = this->dataPtr->directRosNode->create_service<phntm_interfaces::srv::GetFloat32>(srv_name,
+                                                                                   std::bind(&CameraSensorPrivate::srvGetPoseZ, this->dataPtr.get(), std::placeholders::_1, std::placeholders::_2));
+  }
+
+  if (sdf_camera->HasElement("tf_static_topic") && !sdf_camera->GetElement("tf_static_topic")->GetValue()->GetAsString().empty()) {
+    rclcpp::QoS qos(1);
+    qos.reliable();
+    qos.transient_local();
+    this->dataPtr->tfStaticPub = this->dataPtr->directRosNode->create_publisher<tf2_msgs::msg::TFMessage>(sdf_camera->GetElement("tf_static_topic")->GetValue()->GetAsString(), qos);
+    this->dataPtr->tfStaticSub = this->dataPtr->directRosNode->create_subscription<tf2_msgs::msg::TFMessage>(sdf_camera->GetElement("tf_static_topic")->GetValue()->GetAsString(), qos,
+                                                                std::bind(&CameraSensorPrivate::onTfStatic, this->dataPtr.get(), std::placeholders::_1));
+  }
+
   if (sdf_camera->HasElement("encoder_input_pixel_format") && sdf_camera->GetElement("encoder_input_pixel_format")->GetValue()
       && !sdf_camera->GetElement("encoder_input_pixel_format")->GetValue()->GetAsString().empty()) {
     auto str_val = sdf_camera->GetElement("encoder_input_pixel_format")->GetValue()->GetAsString();
@@ -664,7 +722,8 @@ bool CameraSensor::Update(const std::chrono::steady_clock::duration &_now)
             << "' data generation. " << std::endl;
       this->dataPtr->generatingData = false;
     }
-    return true;
+    if (!this->dataPtr->pose_dirty) // only exit here if we're not updating camera pose
+      return true;
   }
   else
   {
@@ -674,6 +733,13 @@ bool CameraSensor::Update(const std::chrono::steady_clock::duration &_now)
             << "' data generation." << std::endl;
       this->dataPtr->generatingData = true;
     }
+  }
+
+  bool generate_pos_update = false;
+  if (this->dataPtr->pose_dirty) {
+    std::cout << "Setting camera " << this->Name() << " pose to " << this->dataPtr->pose_to_set << std::endl;
+    this->dataPtr->camera->SetLocalPose(this->dataPtr->pose_to_set);
+    generate_pos_update = true;
   }
 
   if (this->dataPtr->hasImageConnections || this->dataPtr->hasH264Connections)
@@ -736,6 +802,30 @@ bool CameraSensor::Update(const std::chrono::steady_clock::duration &_now)
     }
 
     this->dataPtr->postRenderCV.notify_one();
+  }
+
+  // using /tf_static (reliable), but need to receive one first, then we only produce an update
+  // the received tf message needs to include this camera's link
+  if (generate_pos_update && this->dataPtr->lastTfStaticMsg && this->dataPtr->tfStaticPub) {
+
+      tf2_msgs::msg::TFMessage *msg = this->dataPtr->lastTfStaticMsg.get();
+
+      bool update = false;
+      for (size_t i = 0; i < msg->transforms.size(); i++) {
+
+          geometry_msgs::msg::TransformStamped *t = &msg->transforms[i];
+          if (t->child_frame_id == this->OpticalFrameId()) {
+            DirectRosNode::SetCurrentStamp(&t->header.stamp, this->dataPtr->now);
+            t->transform.translation.z = this->dataPtr->pose_to_set.Pos().Z();
+            update = true;
+          }
+      }
+      
+      if (update) {
+        std::cout << "Updating camera " << this->Name() << " pose to into tf_static " << std::endl;
+        this->dataPtr->pose_dirty = false;
+        this->dataPtr->tfStaticPub->publish(*msg);
+      }
   }
 
   return true;

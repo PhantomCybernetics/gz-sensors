@@ -21,6 +21,8 @@ namespace gz
             static void ReleaseDirectROSNode(std::string node_name, void* owner_ptr);
             static std::mutex mutex;
             static void SetCurrentStamp(builtin_interfaces::msg::Time *stamp,  std::chrono::steady_clock::duration timestamp);
+            // static void Spin(std::string node_name);
+            // static void StopSpin(std::string node_name);
 
         private:
 
