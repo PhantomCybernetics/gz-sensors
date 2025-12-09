@@ -308,8 +308,9 @@ bool DepthCameraSensor::Load(const sdf::Sensor &_sdf)
 
   // direct uncompressed output
   if (!this->Topic().empty()) {
-    rclcpp::QoS qos(10);
-    // qos.best_effort();
+    rclcpp::QoS qos(1);
+    qos.best_effort();
+    qos.durability_volatile();
     // qos.transient_local();
     this->dataPtr->imagePub = this->dataPtr->directRosNode->create_publisher<sensor_msgs::msg::Image>(this->Topic(), qos);
   }
