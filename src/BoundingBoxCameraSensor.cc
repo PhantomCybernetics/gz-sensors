@@ -489,7 +489,8 @@ void BoundingBoxCameraSensor::OnNewBoundingBoxes2D(
     msg.detections.push_back(det);
   }
 
-  this->dataPtr->boxes2dPub->publish(msg);
+  if (rclcpp::ok()) 
+    this->dataPtr->boxes2dPub->publish(msg);
 }
 
 /////////////////////////////////////////////////
@@ -545,7 +546,8 @@ void BoundingBoxCameraSensor::OnNewBoundingBoxes3D(
     msg.detections.push_back(det);
   }
 
-  this->dataPtr->boxes3dPub->publish(msg);
+  if (rclcpp::ok()) 
+    this->dataPtr->boxes3dPub->publish(msg);
 }
 
 //////////////////////////////////////////////////

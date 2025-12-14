@@ -174,6 +174,8 @@ namespace gz
       /// \internal
       private: std::unique_ptr<DepthCameraSensorPrivate> dataPtr;
       GZ_UTILS_WARN_RESUME__DLL_INTERFACE_MISSING
+
+      private: void Worker();
     };
     }
   }

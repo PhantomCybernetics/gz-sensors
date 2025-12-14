@@ -523,7 +523,7 @@ bool CameraSensor::Load(const sdf::Sensor &_sdf)
 
   // direct uncompressed output
   if (!this->Topic().empty()) {
-    rclcpp::QoS qos(10);
+    rclcpp::QoS qos(1);
     // qos.best_effort();
     // qos.transient_local();
     this->dataPtr->imagePub = this->dataPtr->directRosNode->create_publisher<sensor_msgs::msg::Image>(this->Topic(), qos);
@@ -824,7 +824,8 @@ bool CameraSensor::Update(const std::chrono::steady_clock::duration &_now)
       if (update) {
         std::cout << "Updating camera " << this->Name() << " pose to into tf_static " << std::endl;
         this->dataPtr->pose_dirty = false;
-        this->dataPtr->tfStaticPub->publish(*msg);
+        if (rclcpp::ok()) 
+          this->dataPtr->tfStaticPub->publish(*msg);
       }
   }
 
@@ -1019,7 +1020,8 @@ void CameraSensor::postRenderWorker() {
         msg.data.assign(pixel_buffer->data(), pixel_buffer->data() + this->dataPtr->frame_data_size);
        
         GZ_PROFILE("CameraSensor::Update Publish");
-        this->dataPtr->imagePub->publish(msg);
+        if (rclcpp::ok()) 
+          this->dataPtr->imagePub->publish(msg);
       }
     }
 

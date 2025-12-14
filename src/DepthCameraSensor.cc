@@ -20,6 +20,8 @@
 #include <gz/msgs/pointcloud_packed.pb.h>
 
 #include <mutex>
+#include <queue>
+#include <thread>
 
 #include <gz/common/Console.hh>
 #include <gz/common/Image.hh>
@@ -153,6 +155,11 @@ class gz::sensors::DepthCameraSensorPrivate
     std::shared_ptr<rclcpp::Publisher<sensor_msgs::msg::Image>> imagePub;
     std::chrono::steady_clock::time_point last_debug_time;
     std::chrono::steady_clock::duration now;
+    bool running = false;
+    std::condition_variable queue_cv;
+    std::queue<sensor_msgs::msg::Image> queue;
+    std::thread worker_thread;
+    std::mutex queue_mutex;
 };
 
 using namespace gz;
@@ -229,6 +236,9 @@ DepthCameraSensor::DepthCameraSensor()
 //////////////////////////////////////////////////
 DepthCameraSensor::~DepthCameraSensor()
 {
+  this->dataPtr->running = false; //kills worker
+  this->dataPtr->queue_cv.notify_one();
+
   if (this->dataPtr->directRosNode != nullptr) {
     this->dataPtr->imagePub.reset();
     DirectRosNode::ReleaseDirectROSNode(this->dataPtr->directRosNodeName, this->dataPtr.get());
@@ -493,6 +503,10 @@ bool DepthCameraSensor::CreateCamera()
   this->dataPtr->pointMsg.set_row_step(
       this->dataPtr->pointMsg.point_step() * this->ImageWidth());
 
+  this->dataPtr->running = true;
+  this->dataPtr->worker_thread = std::thread(&DepthCameraSensor::Worker, this);
+  this->dataPtr->worker_thread.detach();
+
   return true;
 }
 
@@ -525,23 +539,60 @@ void DepthCameraSensor::OnNewDepthFrame(const float *_scan,
 
   // std::lock_guard<std::mutex> lock(this->dataPtr->mutex);
   if (_scan != nullptr) {
-    sensor_msgs::msg::Image msg;
-    GZ_PROFILE("DepthCameraSensor::Update Publish");
-    msg.header = std_msgs::msg::Header();
-    msg.header.frame_id = this->OpticalFrameId();
-    msg.step = _width * sizeof(float);
-    DirectRosNode::SetCurrentStamp(&msg.header.stamp, this->dataPtr->now);
-    msg.encoding = "32FC1";
-    msg.width = _width;
-    msg.height = _height;
+    try {
+      sensor_msgs::msg::Image msg;
+      GZ_PROFILE("DepthCameraSensor::Update Publish");
+      msg.header = std_msgs::msg::Header();
+      msg.header.frame_id = this->OpticalFrameId();
+      msg.step = _width * sizeof(float);
+      DirectRosNode::SetCurrentStamp(&msg.header.stamp, this->dataPtr->now);
+      msg.encoding = "32FC1";
+      msg.width = _width;
+      msg.height = _height;
 
-    msg.data.assign(reinterpret_cast<const unsigned char*>(_scan),
-                    reinterpret_cast<const unsigned char*>(_scan) + (sizeof(float) * _width * _height));
-    GZ_PROFILE("CameraSensor::Update Publish");
-    
-    this->dataPtr->imagePub->publish(msg);
+      msg.data.assign(reinterpret_cast<const unsigned char*>(_scan),
+                      reinterpret_cast<const unsigned char*>(_scan) + (sizeof(float) * _width * _height));
+      GZ_PROFILE("CameraSensor::Update Publish");
+      
+       {
+        std::lock_guard<std::mutex> queue_lock(this->dataPtr->queue_mutex);
+        this->dataPtr->queue.push(msg);
+      }
+      this->dataPtr->queue_cv.notify_one();
+
+    } catch(...) {
+      std::cout << this->Name() << " Exception in OnNewDepthFrame" << std::endl;
+    }
   }
 }
+
+void DepthCameraSensor::Worker() {
+  while (this->dataPtr->running) {
+
+      std::unique_lock<std::mutex> lock(this->dataPtr->queue_mutex);
+      this->dataPtr->queue_cv.wait(lock, [this] { return !this->dataPtr->queue.empty() || !this->dataPtr->running; });
+
+      if (this->dataPtr->queue.empty() || !this->dataPtr->running) {
+          lock.unlock();
+          break;
+      } 
+
+      sensor_msgs::msg::Image msg;
+      while (!this->dataPtr->queue.empty()) {
+          msg = this->dataPtr->queue.front();
+          this->dataPtr->queue.pop();
+          break;
+      }
+
+      lock.unlock();
+
+     if (rclcpp::ok()) 
+        this->dataPtr->imagePub->publish(msg);
+
+  }
+}
+
+
 
 /////////////////////////////////////////////////
 void DepthCameraSensor::OnNewRgbPointCloud(const float *_scan,
